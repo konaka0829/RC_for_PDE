@@ -116,7 +116,8 @@ if __name__ == "__main__":
         washout_list = [int(washout_rate * x.size(0))] * x.size(1)
 
         model(x, washout_list, None, target)
-        model.fit()
+
+    model.fit()
 
     # Evaluate on training set
     tot_correct = 0
@@ -137,6 +138,8 @@ if __name__ == "__main__":
     print("Training accuracy:", tot_correct / tot_obs)
 
     # Test
+    tot_correct = 0
+    tot_obs = 0
     viz_images = None
     viz_labels = None
     viz_preds = None
