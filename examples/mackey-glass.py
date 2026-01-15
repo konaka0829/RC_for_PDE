@@ -1,5 +1,3 @@
-
-import torch.nn
 """
 Mackey-Glass Time Series Prediction using Echo State Network (ESN).
 
@@ -35,11 +33,19 @@ Dataset:
     The mg17.csv file should contain two columns representing the input and target
     values of the Mackey-Glass time series with tau=17.
 """
+import os
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import torch
+import torch.nn
 import numpy as np
 from torchesn.nn import ESN
 from torchesn import utils
 import time
-import os
 
 device = torch.device('cpu')
 dtype = torch.double
