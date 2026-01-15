@@ -40,6 +40,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import argparse
 import torch
 import torch.nn
 import numpy as np
@@ -47,30 +48,6 @@ import matplotlib.pyplot as plt
 from torchesn.nn import ESN
 from torchesn import utils
 import time
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-dtype = torch.double
-torch.set_default_dtype(dtype)
-
-data_path = os.path.join(os.path.dirname(__file__), 'datasets/mg17.csv')
-if dtype == torch.double:
-    data = np.loadtxt(data_path, delimiter=',', dtype=np.float64)
-elif dtype == torch.float:
-    data = np.loadtxt(data_path, delimiter=',', dtype=np.float32)
-X_data = np.expand_dims(data[:, [0]], axis=1)
-Y_data = np.expand_dims(data[:, [1]], axis=1)
-X_data = torch.from_numpy(X_data).to(device)
-Y_data = torch.from_numpy(Y_data).to(device)
-
-trX = X_data[:5000]
-trY = Y_data[:5000]
-tsX = X_data[5000:]
-tsY = Y_data[5000:]
-
-washout = [500]
-input_size = output_size = 1
-hidden_size = 500
-loss_fcn = torch.nn.MSELoss()
 
 
 def save_figure(fig, output_path_base):
@@ -82,12 +59,72 @@ def save_figure(fig, output_path_base):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Mackey-Glass Time Series Prediction using ESN"
+    )
+    parser.add_argument("--data-path", type=str, default=None)
+    parser.add_argument("--train-size", type=int, default=5000)
+    parser.add_argument("--washout", type=int, default=500)
+    parser.add_argument("--hidden-size", type=int, default=500)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--dtype", choices=["float", "double"], default="double")
+    parser.add_argument("--spectral-radius", type=float, default=0.9)
+    parser.add_argument("--leaking-rate", type=float, default=1.0)
+    parser.add_argument("--w-ih-scale", type=float, default=1.0)
+    parser.add_argument("--lambda-reg", type=float, default=0.0)
+    parser.add_argument("--density", type=float, default=1.0)
+    parser.add_argument("--readout-training", default="svd")
+    parser.add_argument("--output-steps", choices=["all", "mean", "last"], default="all")
+    parser.add_argument("--show-plots", action="store_true")
+    args = parser.parse_args()
+
+    device = (
+        torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if args.device == "auto"
+        else torch.device(args.device)
+    )
+    dtype = torch.double if args.dtype == "double" else torch.float
+    torch.set_default_dtype(dtype)
+
+    data_path = args.data_path or os.path.join(os.path.dirname(__file__), 'datasets/mg17.csv')
+    if dtype == torch.double:
+        data = np.loadtxt(data_path, delimiter=',', dtype=np.float64)
+    elif dtype == torch.float:
+        data = np.loadtxt(data_path, delimiter=',', dtype=np.float32)
+    X_data = np.expand_dims(data[:, [0]], axis=1)
+    Y_data = np.expand_dims(data[:, [1]], axis=1)
+    X_data = torch.from_numpy(X_data).to(device)
+    Y_data = torch.from_numpy(Y_data).to(device)
+
+    if args.train_size <= 0 or args.train_size >= X_data.size(0):
+        raise ValueError("train-size must be > 0 and < total samples.")
+
+    trX = X_data[:args.train_size]
+    trY = Y_data[:args.train_size]
+    tsX = X_data[args.train_size:]
+    tsY = Y_data[args.train_size:]
+
+    washout = [args.washout]
+    input_size = output_size = 1
+    loss_fcn = torch.nn.MSELoss()
+
     start = time.time()
 
     # Training
     trY_flat = utils.prepare_target(trY.clone(), [trX.size(0)], washout)
 
-    model = ESN(input_size, hidden_size, output_size)
+    model = ESN(
+        input_size,
+        args.hidden_size,
+        output_size,
+        output_steps=args.output_steps,
+        readout_training=args.readout_training,
+        spectral_radius=args.spectral_radius,
+        leaking_rate=args.leaking_rate,
+        w_ih_scale=args.w_ih_scale,
+        lambda_reg=args.lambda_reg,
+        density=args.density,
+    )
     model.to(device)
 
     model(trX, washout, None, trY_flat)
@@ -112,4 +149,5 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
     save_figure(fig, os.path.join(os.path.dirname(__file__), "figures", "mackey_glass_prediction"))
-    plt.show()
+    if args.show_plots:
+        plt.show()

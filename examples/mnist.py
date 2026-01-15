@@ -36,6 +36,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import argparse
 import torch
 from torchvision import datasets, transforms
 from torchesn.nn import ESN
@@ -66,9 +67,40 @@ def one_hot(y, output_dim):
     return onehot
 
 
-def reshape_batch(batch):
-    batch = batch.view(batch.size(0), -1)
-    return batch.unsqueeze(0)
+def resolve_sequence_params(sequence_mode, time_steps, image_height, image_width):
+    flattened = image_height * image_width
+    if sequence_mode == "flat":
+        return 1, flattened
+    if sequence_mode == "rows":
+        return image_height, image_width
+    if sequence_mode == "cols":
+        return image_width, image_height
+    if sequence_mode == "time_steps":
+        if time_steps is None:
+            raise ValueError("time_steps must be set when sequence_mode='time_steps'.")
+        if flattened % time_steps != 0:
+            raise ValueError(
+                f"time_steps={time_steps} must divide {flattened} for MNIST."
+            )
+        return time_steps, flattened // time_steps
+    raise ValueError(f"Unsupported sequence_mode: {sequence_mode}")
+
+
+def reshape_batch(batch, sequence_mode, time_steps=None):
+    batch = batch.view(batch.size(0), 28, 28)
+    if sequence_mode == "flat":
+        batch = batch.view(batch.size(0), -1)
+        return batch.unsqueeze(0)
+    if sequence_mode == "rows":
+        seq = batch
+    elif sequence_mode == "cols":
+        seq = batch.transpose(1, 2)
+    elif sequence_mode == "time_steps":
+        flattened = batch.view(batch.size(0), -1)
+        seq = flattened.view(batch.size(0), time_steps, -1)
+    else:
+        raise ValueError(f"Unsupported sequence_mode: {sequence_mode}")
+    return seq.permute(1, 0, 2).contiguous()
 
 
 def aggregate_output(output, output_steps):
@@ -79,44 +111,85 @@ def aggregate_output(output, output_steps):
     raise ValueError(f"Unsupported output_steps for classification: {output_steps}")
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-dtype = torch.float
-torch.set_default_dtype(dtype)
-loss_fcn = Accuracy_Correct
-
-torch.manual_seed(0)
-
-batch_size = 512  # Tune it according to your VRAM's size.
-input_size = 784
-hidden_size = 1000
-output_size = 10
-washout_rate = 0.2
-eval_output_steps = 'mean'
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="MNIST ESN classifier")
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--hidden-size", type=int, default=1000)
+    parser.add_argument("--washout-rate", type=float, default=0.2)
+    parser.add_argument("--eval-output-steps", choices=["mean", "last"], default="mean")
+    parser.add_argument(
+        "--sequence-mode",
+        choices=["flat", "rows", "cols", "time_steps"],
+        default="flat",
+    )
+    parser.add_argument("--time-steps", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--data-path", type=str, default=None)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--readout-training", default="cholesky")
+    parser.add_argument("--output-steps", choices=["all", "mean", "last"], default="mean")
+    parser.add_argument("--spectral-radius", type=float, default=0.9)
+    parser.add_argument("--leaking-rate", type=float, default=1.0)
+    parser.add_argument("--w-ih-scale", type=float, default=1.0)
+    parser.add_argument("--lambda-reg", type=float, default=0.0)
+    parser.add_argument("--density", type=float, default=1.0)
+    parser.add_argument("--w-io", action="store_true")
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--pin-memory", action="store_true")
+    return parser
 
 if __name__ == "__main__":
-    data_path = os.path.join(os.path.dirname(__file__), 'datasets')
+    args = build_arg_parser().parse_args()
+
+    if args.device == "auto":
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+    dtype = torch.float
+    torch.set_default_dtype(dtype)
+    loss_fcn = Accuracy_Correct
+
+    torch.manual_seed(args.seed)
+
+    image_height = 28
+    image_width = 28
+    output_size = 10
+    seq_len, input_size = resolve_sequence_params(
+        args.sequence_mode, args.time_steps, image_height, image_width
+    )
+    data_path = args.data_path or os.path.join(os.path.dirname(__file__), 'datasets')
     train_iter = torch.utils.data.DataLoader(
         datasets.MNIST(data_path, train=True, download=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))])),
-        batch_size=batch_size, shuffle=True, num_workers=0,
-        pin_memory=torch.cuda.is_available())
+        batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+        pin_memory=args.pin_memory or torch.cuda.is_available())
 
     test_iter = torch.utils.data.DataLoader(
         datasets.MNIST(data_path, train=False,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))])),
-        batch_size=batch_size, shuffle=False, num_workers=0,
-        pin_memory=torch.cuda.is_available())
+        batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+        pin_memory=args.pin_memory or torch.cuda.is_available())
 
     start = time.time()
 
     # Training
-    model = ESN(input_size, hidden_size, output_size,
-                output_steps='mean', readout_training='cholesky',
-                w_io=True)
+    model = ESN(
+        input_size,
+        args.hidden_size,
+        output_size,
+        output_steps=args.output_steps,
+        readout_training=args.readout_training,
+        w_io=args.w_io,
+        spectral_radius=args.spectral_radius,
+        leaking_rate=args.leaking_rate,
+        w_ih_scale=args.w_ih_scale,
+        lambda_reg=args.lambda_reg,
+        density=args.density,
+    )
     model.to(device)
 
     # Fit the model
@@ -125,9 +198,9 @@ if __name__ == "__main__":
         x = x.to(device)
         y = y.to(device)
 
-        x = reshape_batch(x)
+        x = reshape_batch(x, args.sequence_mode, args.time_steps)
         target = one_hot(y, output_size)
-        washout_list = [int(washout_rate * x.size(0))] * x.size(1)
+        washout_list = [int(args.washout_rate * x.size(0))] * x.size(1)
 
         model(x, washout_list, None, target)
 
@@ -143,11 +216,11 @@ if __name__ == "__main__":
             x = x.to(device)
             y = y.to(device)
 
-            x = reshape_batch(x)
-            washout_list = [int(washout_rate * x.size(0))] * x.size(1)
+            x = reshape_batch(x, args.sequence_mode, args.time_steps)
+            washout_list = [int(args.washout_rate * x.size(0))] * x.size(1)
 
             output, hidden = model(x, washout_list)
-            logits = aggregate_output(output, eval_output_steps)
+            logits = aggregate_output(output, args.eval_output_steps)
             tot_obs += x.size(1)
             tot_correct += loss_fcn(logits, y)
 
@@ -166,11 +239,11 @@ if __name__ == "__main__":
         y = y.to(device)
 
         x_images = x.detach().cpu()
-        x_seq = reshape_batch(x)
-        washout_list = [int(washout_rate * x_seq.size(0))] * x_seq.size(1)
+        x_seq = reshape_batch(x, args.sequence_mode, args.time_steps)
+        washout_list = [int(args.washout_rate * x_seq.size(0))] * x_seq.size(1)
 
         output, hidden = model(x_seq, washout_list)
-        logits = aggregate_output(output, eval_output_steps)
+        logits = aggregate_output(output, args.eval_output_steps)
         tot_obs += x_seq.size(1)
         tot_correct += loss_fcn(logits, y)
         if viz_images is None:
