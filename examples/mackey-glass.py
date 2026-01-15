@@ -43,11 +43,12 @@ if REPO_ROOT not in sys.path:
 import torch
 import torch.nn
 import numpy as np
+import matplotlib.pyplot as plt
 from torchesn.nn import ESN
 from torchesn import utils
 import time
 
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.double
 torch.set_default_dtype(dtype)
 
@@ -89,3 +90,16 @@ if __name__ == "__main__":
     output, hidden = model(tsX, [0], hidden)
     print("Test error:", loss_fcn(output, tsY).item())
     print("Ended in", time.time() - start, "seconds.")
+
+    predictions = output.detach().cpu().squeeze().numpy()
+    targets = tsY.detach().cpu().squeeze().numpy()
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(targets, label="Target")
+    plt.plot(predictions, label="Prediction")
+    plt.title("Mackey-Glass Time Series Prediction")
+    plt.xlabel("Time Step")
+    plt.ylabel("Value")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()

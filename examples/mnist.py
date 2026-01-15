@@ -39,6 +39,7 @@ if REPO_ROOT not in sys.path:
 import torch
 from torchvision import datasets, transforms
 from torchesn.nn import ESN
+import matplotlib.pyplot as plt
 import time
 
 
@@ -62,7 +63,7 @@ def reshape_batch(batch):
     return batch.transpose(0, 1).transpose(0, 2)
 
 
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.float
 torch.set_default_dtype(dtype)
 loss_fcn = Accuracy_Correct
@@ -128,18 +129,40 @@ if __name__ == "__main__":
     print("Training accuracy:", tot_correct / tot_obs)
 
     # Test
+    viz_images = None
+    viz_labels = None
+    viz_preds = None
+
     for batch in test_iter:
         x, y = batch
         x = x.to(device)
         y = y.to(device)
 
-        x = reshape_batch(x)
-        washout_list = [int(washout_rate * x.size(0))] * x.size(1)
+        x_images = x.detach().cpu()
+        x_seq = reshape_batch(x)
+        washout_list = [int(washout_rate * x_seq.size(0))] * x_seq.size(1)
 
-        output, hidden = model(x, washout_list)
-        tot_obs += x.size(1)
+        output, hidden = model(x_seq, washout_list)
+        tot_obs += x_seq.size(1)
         tot_correct += loss_fcn(output[-1], y.type(torch.get_default_dtype()))
+        if viz_images is None:
+            viz_images = x_images
+            viz_labels = y.detach().cpu()
+            viz_preds = torch.argmax(output[-1].detach().cpu(), dim=1)
 
     print("Test accuracy:", tot_correct / tot_obs)
 
     print("Ended in", time.time() - start, "seconds.")
+
+    if viz_images is not None:
+        num_images = min(16, viz_images.size(0))
+        fig, axes = plt.subplots(4, 4, figsize=(6, 6))
+        for idx in range(num_images):
+            ax = axes[idx // 4, idx % 4]
+            image = viz_images[idx].squeeze().numpy()
+            ax.imshow(image, cmap="gray")
+            ax.set_title(f"P:{viz_preds[idx].item()} T:{viz_labels[idx].item()}")
+            ax.axis("off")
+        plt.suptitle("MNIST Predictions (P: Predicted, T: True)")
+        plt.tight_layout()
+        plt.show()
