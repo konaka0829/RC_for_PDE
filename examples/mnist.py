@@ -21,8 +21,8 @@ Functions:
 
 Parameters:
     batch_size (int): Number of samples per batch - tune according to available memory
-    input_size (int): Dimensionality of input features (1)
-    hidden_size (int): Number of neurons in the ESN reservoir (500)
+    input_size (int): Dimensionality of input features (784)
+    hidden_size (int): Number of neurons in the ESN reservoir (1000)
     output_size (int): Number of output classes (10 for digits 0-9)
     washout_rate (float): Fraction of initial timesteps to discard (0.2)
 
@@ -52,8 +52,8 @@ def save_figure(fig, output_path_base):
 
 
 def Accuracy_Correct(y_pred, y_true):
-    labels = torch.argmax(y_pred, 1).type(y_pred.type())
-    correct = len((labels == y_true).nonzero())
+    labels = torch.argmax(y_pred, 1)
+    correct = (labels == y_true).sum().item()
     return correct
 
 
@@ -67,8 +67,16 @@ def one_hot(y, output_dim):
 
 
 def reshape_batch(batch):
-    batch = batch.view(batch.size(0), batch.size(1), -1)
-    return batch.transpose(0, 1).transpose(0, 2)
+    batch = batch.view(batch.size(0), -1)
+    return batch.unsqueeze(0)
+
+
+def aggregate_output(output, output_steps):
+    if output_steps == 'mean':
+        return output.mean(dim=0)
+    if output_steps == 'last':
+        return output[-1]
+    raise ValueError(f"Unsupported output_steps for classification: {output_steps}")
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -76,11 +84,14 @@ dtype = torch.float
 torch.set_default_dtype(dtype)
 loss_fcn = Accuracy_Correct
 
-batch_size = 256  # Tune it according to your VRAM's size.
-input_size = 1
-hidden_size = 500
+torch.manual_seed(0)
+
+batch_size = 512  # Tune it according to your VRAM's size.
+input_size = 784
+hidden_size = 1000
 output_size = 10
 washout_rate = 0.2
+eval_output_steps = 'mean'
 
 if __name__ == "__main__":
     data_path = os.path.join(os.path.dirname(__file__), 'datasets')
@@ -89,20 +100,23 @@ if __name__ == "__main__":
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))])),
-        batch_size=batch_size, shuffle=True, num_workers=1, pin_memory=True)
+        batch_size=batch_size, shuffle=True, num_workers=0,
+        pin_memory=torch.cuda.is_available())
 
     test_iter = torch.utils.data.DataLoader(
         datasets.MNIST(data_path, train=False,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))])),
-        batch_size=batch_size, shuffle=False, num_workers=1, pin_memory=True)
+        batch_size=batch_size, shuffle=False, num_workers=0,
+        pin_memory=torch.cuda.is_available())
 
     start = time.time()
 
     # Training
     model = ESN(input_size, hidden_size, output_size,
-                output_steps='mean', readout_training='cholesky')
+                output_steps='mean', readout_training='cholesky',
+                w_io=True)
     model.to(device)
 
     # Fit the model
@@ -119,23 +133,25 @@ if __name__ == "__main__":
 
     model.fit()
 
-    # Evaluate on training set
-    tot_correct = 0
-    tot_obs = 0
+    # Evaluate on training set (optional, can be slow on CPU)
+    if os.environ.get("EVAL_TRAINING") == "1":
+        tot_correct = 0
+        tot_obs = 0
 
-    for batch in train_iter:
-        x, y = batch
-        x = x.to(device)
-        y = y.to(device)
+        for batch in train_iter:
+            x, y = batch
+            x = x.to(device)
+            y = y.to(device)
 
-        x = reshape_batch(x)
-        washout_list = [int(washout_rate * x.size(0))] * x.size(1)
+            x = reshape_batch(x)
+            washout_list = [int(washout_rate * x.size(0))] * x.size(1)
 
-        output, hidden = model(x, washout_list)
-        tot_obs += x.size(1)
-        tot_correct += loss_fcn(output[-1], y.type(torch.get_default_dtype()))
+            output, hidden = model(x, washout_list)
+            logits = aggregate_output(output, eval_output_steps)
+            tot_obs += x.size(1)
+            tot_correct += loss_fcn(logits, y)
 
-    print("Training accuracy:", tot_correct / tot_obs)
+        print("Training accuracy:", tot_correct / tot_obs)
 
     # Test
     tot_correct = 0
@@ -154,12 +170,13 @@ if __name__ == "__main__":
         washout_list = [int(washout_rate * x_seq.size(0))] * x_seq.size(1)
 
         output, hidden = model(x_seq, washout_list)
+        logits = aggregate_output(output, eval_output_steps)
         tot_obs += x_seq.size(1)
-        tot_correct += loss_fcn(output[-1], y.type(torch.get_default_dtype()))
+        tot_correct += loss_fcn(logits, y)
         if viz_images is None:
             viz_images = x_images
             viz_labels = y.detach().cpu()
-            viz_preds = torch.argmax(output[-1].detach().cpu(), dim=1)
+            viz_preds = torch.argmax(logits.detach().cpu(), dim=1)
 
     print("Test accuracy:", tot_correct / tot_obs)
 
@@ -177,4 +194,5 @@ if __name__ == "__main__":
         plt.suptitle("MNIST Predictions (P: Predicted, T: True)")
         plt.tight_layout()
         save_figure(fig, os.path.join(os.path.dirname(__file__), "figures", "mnist_predictions"))
-        plt.show()
+        if os.environ.get("SHOW_PLOTS") == "1":
+            plt.show()
