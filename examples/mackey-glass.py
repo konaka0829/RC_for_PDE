@@ -72,6 +72,15 @@ input_size = output_size = 1
 hidden_size = 500
 loss_fcn = torch.nn.MSELoss()
 
+
+def save_figure(fig, output_path_base):
+    output_dir = os.path.dirname(output_path_base)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    for ext in ("pdf", "svg", "png"):
+        fig.savefig(f"{output_path_base}.{ext}", bbox_inches="tight")
+
+
 if __name__ == "__main__":
     start = time.time()
 
@@ -94,7 +103,7 @@ if __name__ == "__main__":
     predictions = output.detach().cpu().squeeze().numpy()
     targets = tsY.detach().cpu().squeeze().numpy()
 
-    plt.figure(figsize=(10, 4))
+    fig = plt.figure(figsize=(10, 4))
     plt.plot(targets, label="Target")
     plt.plot(predictions, label="Prediction")
     plt.title("Mackey-Glass Time Series Prediction")
@@ -102,4 +111,5 @@ if __name__ == "__main__":
     plt.ylabel("Value")
     plt.legend()
     plt.tight_layout()
+    save_figure(fig, os.path.join(os.path.dirname(__file__), "figures", "mackey_glass_prediction"))
     plt.show()

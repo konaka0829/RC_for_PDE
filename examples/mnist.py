@@ -43,6 +43,14 @@ import matplotlib.pyplot as plt
 import time
 
 
+def save_figure(fig, output_path_base):
+    output_dir = os.path.dirname(output_path_base)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    for ext in ("pdf", "svg", "png"):
+        fig.savefig(f"{output_path_base}.{ext}", bbox_inches="tight")
+
+
 def Accuracy_Correct(y_pred, y_true):
     labels = torch.argmax(y_pred, 1).type(y_pred.type())
     correct = len((labels == y_true).nonzero())
@@ -165,4 +173,5 @@ if __name__ == "__main__":
             ax.axis("off")
         plt.suptitle("MNIST Predictions (P: Predicted, T: True)")
         plt.tight_layout()
+        save_figure(fig, os.path.join(os.path.dirname(__file__), "figures", "mnist_predictions"))
         plt.show()
