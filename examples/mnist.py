@@ -1,5 +1,3 @@
-
-import os
 """
 MNIST Digit Classification using Echo State Network (ESN)
 
@@ -31,6 +29,13 @@ Parameters:
 NOTE: THIS IS A DEMONSTRATION OF LIBRARY USAGE WITH LARGER DATASETS REQUIRING BATCHING.
 THE HYPERPARAMETERS ARE NOT OPTIMIZED FOR ACCURACY.
 """
+import os
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import torch
 from torchvision import datasets, transforms
 from torchesn.nn import ESN
