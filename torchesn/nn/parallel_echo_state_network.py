@@ -43,6 +43,8 @@ class ParallelESN(nn.Module):
         seed=None,
         translation_invariant=False,
         mu=0.0,
+        sigma=None,
+        kappa=None,
     ):
         super().__init__()
         if Q % g != 0:
@@ -63,6 +65,13 @@ class ParallelESN(nn.Module):
         self.q = Q // g
         self.translation_invariant = translation_invariant
 
+        if sigma is not None:
+            w_ih_scale = sigma
+        else:
+            w_ih_scale = 1.0
+        if kappa is not None:
+            density = min(1.0, kappa / float(hidden_size))
+
         input_size = self.q + 2 * l
         output_size = self.q
 
@@ -73,6 +82,7 @@ class ParallelESN(nn.Module):
                 output_size=output_size,
                 spectral_radius=spectral_radius,
                 leaking_rate=leaking_rate,
+                w_ih_scale=w_ih_scale,
                 density=density,
                 lambda_reg=lambda_reg,
                 readout_training=readout_training,
@@ -90,6 +100,7 @@ class ParallelESN(nn.Module):
                     output_size=output_size,
                     spectral_radius=spectral_radius,
                     leaking_rate=leaking_rate,
+                    w_ih_scale=w_ih_scale,
                     density=density,
                     lambda_reg=lambda_reg,
                     readout_training=readout_training,
@@ -112,12 +123,14 @@ class ParallelESN(nn.Module):
             raise RuntimeError("u_train must have shape (T, Q).")
 
         T = u_train.size(0)
+        if T < 2:
+            raise ValueError("u_train must have at least 2 timesteps.")
         washout_list = [washout]
-        seq_lengths = [T]
+        seq_lengths = [T - 1]
 
         for i, esn in enumerate(self.esns):
-            x_i = u_train[:, parallel_input_indices(self.Q, self.g, self.l, i)]
-            y_i = u_train[:, parallel_output_indices(self.Q, self.g, i)]
+            x_i = u_train[:-1, parallel_input_indices(self.Q, self.g, self.l, i)]
+            y_i = u_train[1:, parallel_output_indices(self.Q, self.g, i)]
 
             x_i = x_i.unsqueeze(1)
             y_i = y_i.unsqueeze(1)
@@ -141,8 +154,10 @@ class ParallelESN(nn.Module):
         self.hx = [None for _ in range(self.g)]
         if epsilon == 0:
             return
+        if u_hist.size(0) < epsilon + 1:
+            raise ValueError("u_hist must include epsilon+1 timesteps for warmup.")
 
-        history = u_hist[-epsilon:]
+        history = u_hist[-(epsilon + 1):-1]
         for t in range(history.size(0)):
             u_t = history[t].unsqueeze(0)
             for i, esn in enumerate(self.esns):
@@ -155,6 +170,8 @@ class ParallelESN(nn.Module):
             raise RuntimeError("u_hist must have shape (T, Q).")
         if steps <= 0:
             raise ValueError("steps must be a positive integer.")
+        if epsilon > 0 and u_hist.size(0) < epsilon + 1:
+            raise ValueError("u_hist must have at least epsilon+1 rows.")
 
         self.warmup(u_hist, epsilon)
 
@@ -177,23 +194,20 @@ class ParallelESN(nn.Module):
             raise RuntimeError("u_eval must have shape (T, Q).")
         if K <= 0 or tau <= 0:
             raise ValueError("K and tau must be positive integers.")
+        required = K * tau + epsilon + 1
+        if u_eval.size(0) < required:
+            raise ValueError(
+                f"u_eval length {u_eval.size(0)} is too short for "
+                f"K={K}, tau={tau}, epsilon={epsilon}."
+            )
 
         rmse_curves = []
         for k in range(K):
             start = k * tau
-            history_len = max(epsilon, 1)
-            hist_end = start + history_len
-            target_start = start + (epsilon if epsilon > 0 else 1)
-            target_end = target_start + tau
-            if target_end > u_eval.size(0):
-                break
-            u_hist = u_eval[start:hist_end]
+            u_hist = u_eval[start : start + epsilon + 1]
             pred = self.predict(u_hist, steps=tau, epsilon=epsilon)
-            target = u_eval[target_start:target_end]
+            target = u_eval[start + epsilon + 1 : start + epsilon + 1 + tau]
             rmse = torch.sqrt(torch.mean((pred - target) ** 2, dim=1))
             rmse_curves.append(rmse)
-
-        if not rmse_curves:
-            raise ValueError("Not enough data for the requested windows.")
 
         return torch.stack(rmse_curves, dim=0).mean(dim=0)

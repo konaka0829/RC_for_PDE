@@ -146,7 +146,7 @@ class ESN(nn.Module):
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
                  w_io=False, readout_training='svd', output_steps='all',
-                 readout_features='linear'):
+                 readout_features='linear', sigma=None, kappa=None):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -164,6 +164,10 @@ class ESN(nn.Module):
         self.batch_first = batch_first
         self.leaking_rate = leaking_rate
         self.spectral_radius = spectral_radius
+        if sigma is not None:
+            w_ih_scale = sigma
+        if kappa is not None:
+            density = min(1.0, kappa / float(hidden_size))
         if type(w_ih_scale) != torch.Tensor:
             self.w_ih_scale = torch.ones(input_size + 1)
             self.w_ih_scale *= w_ih_scale
@@ -283,7 +287,8 @@ class ESN(nn.Module):
             # Branch based on training method
             if self.readout_training == 'gd' or target is None:
                 # Online training or inference: use current readout weights
-                with torch.enable_grad():
+                grad_enabled = self.readout_training == 'gd' and torch.is_grad_enabled()
+                with torch.set_grad_enabled(grad_enabled):
                     output = self.readout(readout_features)
 
                     # Zero out padded positions for packed sequences
@@ -348,7 +353,7 @@ class ESN(nn.Module):
                     idx = s > 1e-15  # same default value as scipy.linalg.pinv
                     s_nnz = s[idx][:, None]
                     UTy = torch.mm(U.t(), target)
-                    d = torch.zeros(s.size(0), 1, device=X.device)
+                    d = torch.zeros(s.size(0), 1, device=X.device, dtype=X.dtype)
                     d[idx] = s_nnz / (s_nnz ** 2 + self.lambda_reg)
                     d_UT_y = d * UTy
                     W = torch.mm(Vh.t(), d_UT_y).t()
@@ -414,7 +419,8 @@ class ESN(nn.Module):
             else:
                 readout_features = readout_linear
 
-        with torch.enable_grad():
+        grad_enabled = self.readout_training == 'gd' and torch.is_grad_enabled()
+        with torch.set_grad_enabled(grad_enabled):
             output = self.readout(readout_features)
 
         return output, hx_next
@@ -480,15 +486,23 @@ class ESN(nn.Module):
 
         if self.readout_training == 'cholesky':
             # Solve (X^T X + λI) W = X^T y using Cholesky decomposition
-            A = self.XTX + self.lambda_reg * torch.eye(
-                self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            eye = torch.eye(self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            A = self.XTX + self.lambda_reg * eye
             try:
                 L = torch.linalg.cholesky(A)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Cholesky decomposition failed. Please set lambda_reg > 0."
-                ) from exc
-            W = torch.cholesky_solve(self.XTy, L).t()
+                W = torch.cholesky_solve(self.XTy, L).t()
+            except RuntimeError:
+                jitter = 1e-6 * eye
+                try:
+                    L = torch.linalg.cholesky(A + jitter)
+                    W = torch.cholesky_solve(self.XTy, L).t()
+                except RuntimeError:
+                    A_jitter = A + jitter
+                    try:
+                        W = torch.linalg.solve(A_jitter, self.XTy).t()
+                    except RuntimeError:
+                        W = (torch.linalg.pinv(A_jitter) @ self.XTy).t()
+
             # Clear accumulated statistics
             self.XTX = None
             self.XTy = None
