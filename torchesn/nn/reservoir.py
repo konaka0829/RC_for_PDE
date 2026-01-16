@@ -1,23 +1,3 @@
-"""
-Reservoir implementation for Echo State Networks.
-
-This module implements the core reservoir dynamics for ESNs, including the recurrent
-neural network with fixed random weights, leaky integration, and various activation
-functions. The reservoir is the key component that provides the temporal memory and
-nonlinear transformation capabilities of Echo State Networks.
-
-Key components:
-- Reservoir: Main reservoir module with configurable dynamics
-- ReservoirCells: Individual neuron update functions (Tanh, ReLU, Identity)
-- Recurrent/VariableRecurrent: Handlers for fixed and variable-length sequences
-- AutogradReservoir: Factory function for creating reservoir computations
-
-The reservoir weights are randomly initialized once and kept fixed during training,
-following the Echo State Property which ensures that the reservoir state is uniquely
-determined by the driving input sequence.
-
-Author: Stefano Nardo
-"""
 import re
 import torch
 import torch.nn as nn

@@ -1,13 +1,3 @@
-"""
-Echo State Network (ESN) implementation in PyTorch.
-
-This module provides a complete implementation of Echo State Networks, a type of
-reservoir computing model that excels at temporal sequence modeling tasks. The
-implementation supports both single-layer and multi-layer (Deep ESN) architectures
-with various training algorithms and output aggregation methods.
-
-Author: Stefano Nardo
-"""
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import PackedSequence, pad_packed_sequence
