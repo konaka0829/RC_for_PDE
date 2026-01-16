@@ -114,7 +114,15 @@ python examples/prl2018_figures.py fig6_shared_weights --quick --out-dir /tmp/pr
 **ポイント**
 - `--quick` はCI用の短時間設定です。  
   論文再現を狙う場合は `--paper-defaults` を利用してください。
-- 出力は PNG で保存されます。
+- 図は指定した `--out-dir` に保存されます（デフォルト: `examples/figures/prl2018`）。
+
+### 出力ファイル
+出力は **PNG / PDF / SVG** の3形式で保存されます。
+
+- Fig2: `fig2_true.{png,pdf,svg}`, `fig2_pred.{png,pdf,svg}`, `fig2_error.{png,pdf,svg}`
+- Fig4: `fig4_true.{png,pdf,svg}`, `fig4_pred.{png,pdf,svg}`, `fig4_error.{png,pdf,svg}`, `fig4_error_ks.{png,pdf,svg}`
+- Fig5: `fig5_a.{png,pdf,svg}`, `fig5_b.{png,pdf,svg}`, `fig5_settings.json`
+- Fig6: `fig6.{png,pdf,svg}`
 
 ---
 
@@ -128,7 +136,9 @@ python examples/eval_ks_rmse.py --quick --out-dir /tmp/ks_eval
 ```
 
 ### 出力
-- `rmse_curve.png` : RMSE 曲線
+出力は指定した `--out-dir` に保存されます（デフォルト: `examples/figures/ks_eval`）。
+
+- `rmse_curve.png` / `rmse_curve.pdf` / `rmse_curve.svg` : RMSE 曲線
 - `rmse_curve.json` : パラメータと RMSE 配列
 
 ### 代表パラメータ例（論文規模）

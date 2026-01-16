@@ -18,6 +18,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 
+def save_figure(fig, out_dir, stem):
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out_dir / f"{stem}.{ext}", bbox_inches="tight")
+
+
 def apply_paper_defaults(args):
     args.hidden_size = 5000
     args.T_train = 70000
@@ -97,16 +102,16 @@ def rmse_curve(model, u_eval, args):
     return rmse
 
 
-def plot_space_time(data, path, title):
+def plot_space_time(data, out_dir, stem, title):
     if isinstance(data, torch.Tensor):
         data = data.detach().cpu().numpy()
-    plt.figure(figsize=(6, 4))
+    fig = plt.figure(figsize=(6, 4))
     plt.imshow(data, aspect="auto", origin="lower")
     plt.colorbar()
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(path)
-    plt.close()
+    save_figure(fig, out_dir, stem)
+    plt.close(fig)
 
 
 def fig2_single(args):
@@ -124,9 +129,9 @@ def fig2_single(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    plot_space_time(true, out_dir / "fig2_true.png", "Fig2 true")
-    plot_space_time(pred, out_dir / "fig2_pred.png", "Fig2 pred")
-    plot_space_time(error, out_dir / "fig2_error.png", "Fig2 error")
+    plot_space_time(true, out_dir, "fig2_true", "Fig2 true")
+    plot_space_time(pred, out_dir, "fig2_pred", "Fig2 pred")
+    plot_space_time(error, out_dir, "fig2_error", "Fig2 error")
 
 
 def fig4_parallel(args):
@@ -145,9 +150,9 @@ def fig4_parallel(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    plot_space_time(true, out_dir / "fig4_true.png", "Fig4 true")
-    plot_space_time(pred, out_dir / "fig4_pred.png", "Fig4 pred")
-    plot_space_time(error, out_dir / "fig4_error.png", "Fig4 error")
+    plot_space_time(true, out_dir, "fig4_true", "Fig4 true")
+    plot_space_time(pred, out_dir, "fig4_pred", "Fig4 pred")
+    plot_space_time(error, out_dir, "fig4_error", "Fig4 error")
 
     u_hat0 = pred[0].detach().cpu().numpy()
     ks_from_pred = simulate_ks(
@@ -162,7 +167,7 @@ def fig4_parallel(args):
         dtype=np.float32,
     )
     error_ks = true.detach().cpu().numpy() - ks_from_pred
-    plot_space_time(error_ks, out_dir / "fig4_error_ks.png", "Fig4 error KS")
+    plot_space_time(error_ks, out_dir, "fig4_error_ks", "Fig4 error KS")
     print("Fig4: using u_hat0 from prediction for KS restart.")
 
 
@@ -199,15 +204,15 @@ def fig5_scaling(args):
         curves.append(curve)
         settings.append({"L": L, "g": g, "Q": Q})
 
-    plt.figure(figsize=(6, 4))
+    fig = plt.figure(figsize=(6, 4))
     for curve, setting in zip(curves, settings):
         plt.plot(curve, label=f"L={setting['L']}, g={setting['g']}")
     plt.legend()
     plt.xlabel("t")
     plt.ylabel("RMSE")
     plt.tight_layout()
-    plt.savefig(out_dir / "fig5_a.png")
-    plt.close()
+    save_figure(fig, out_dir, "fig5_a")
+    plt.close(fig)
 
     args.L = 200.0
     args.Q = 512 if not args.quick else 64
@@ -224,15 +229,15 @@ def fig5_scaling(args):
         curves.append(curve)
         settings.append({"g": g})
 
-    plt.figure(figsize=(6, 4))
+    fig = plt.figure(figsize=(6, 4))
     for curve, setting in zip(curves, settings):
         plt.plot(curve, label=f"g={setting['g']}")
     plt.legend()
     plt.xlabel("t")
     plt.ylabel("RMSE")
     plt.tight_layout()
-    plt.savefig(out_dir / "fig5_b.png")
-    plt.close()
+    save_figure(fig, out_dir, "fig5_b")
+    plt.close(fig)
 
     with open(out_dir / "fig5_settings.json", "w", encoding="utf-8") as f:
         json.dump({"scaling": settings}, f, indent=2)
@@ -264,15 +269,15 @@ def fig6_shared_weights(args):
         shared.fit(u_train, washout=0)
         curves[f"shared_mu_{mu}"] = rmse_curve(shared, u_eval, args)
 
-    plt.figure(figsize=(6, 4))
+    fig = plt.figure(figsize=(6, 4))
     for key, curve in curves.items():
         plt.plot(curve, label=key)
     plt.legend()
     plt.xlabel("t")
     plt.ylabel("RMSE")
     plt.tight_layout()
-    plt.savefig(out_dir / "fig6.png")
-    plt.close()
+    save_figure(fig, out_dir, "fig6")
+    plt.close(fig)
 
 
 def add_common_args(parser):
