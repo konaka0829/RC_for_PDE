@@ -191,8 +191,6 @@ class ESN(nn.Module):
                                      output_size)
         else:
             self.readout = nn.Linear(hidden_size * num_layers, output_size)
-        if readout_training == 'offline':
-            self.readout.weight.requires_grad = False
 
         if output_steps in {'all', 'mean', 'last'}:
             self.output_steps = output_steps
@@ -253,7 +251,10 @@ class ESN(nn.Module):
                     input, input_lengths = pad_packed_sequence(input,
                                                           batch_first=self.batch_first)
                 else:
-                    input_lengths = [input.size(0)] * input.size(1)
+                    if self.batch_first:
+                        input_lengths = [input.size(1)] * input.size(0)
+                    else:
+                        input_lengths = [input.size(0)] * input.size(1)
 
                 if self.batch_first:
                     input = input.transpose(0, 1)
@@ -289,7 +290,8 @@ class ESN(nn.Module):
                 batch_size = output.size(1)
 
                 # Prepare design matrix X with bias column
-                X = torch.ones(target.size(0), 1 + output.size(2), device=target.device)
+                X = torch.ones(target.size(0), 1 + output.size(2),
+                               device=target.device, dtype=output.dtype)
                 row = 0
                 
                 # Fill design matrix based on output aggregation method
@@ -306,6 +308,7 @@ class ESN(nn.Module):
                         # Use final timestep for classification
                         X[row, 1:] = output[seq_lengths[s] - 1, s]
                         row += 1
+                assert row == target.size(0)
 
                 if self.readout_training == 'cholesky':
                     # Accumulate normal equations for Cholesky solve
@@ -319,14 +322,14 @@ class ESN(nn.Module):
                 elif self.readout_training == 'svd':
                     # Direct SVD solution (single batch only)
                     # Scikit-Learn SVD solver for ridge regression.
-                    U, s, V = torch.svd(X)
+                    U, s, Vh = torch.linalg.svd(X, full_matrices=False)
                     idx = s > 1e-15  # same default value as scipy.linalg.pinv
                     s_nnz = s[idx][:, None]
                     UTy = torch.mm(U.t(), target)
                     d = torch.zeros(s.size(0), 1, device=X.device)
                     d[idx] = s_nnz / (s_nnz ** 2 + self.lambda_reg)
                     d_UT_y = d * UTy
-                    W = torch.mm(V, d_UT_y).t()
+                    W = torch.mm(Vh.t(), d_UT_y).t()
 
                     # Set readout parameters directly
                     self.readout.bias = nn.Parameter(W[:, 0])
@@ -334,7 +337,6 @@ class ESN(nn.Module):
                     
                 elif self.readout_training == 'inv':
                     # Accumulate normal equations for matrix inversion solve
-                    self.X = X  # Store for rank checking
                     if self.XTX is None:
                         self.XTX = torch.mm(X.t(), X)
                         self.XTy = torch.mm(X.t(), target)
@@ -370,9 +372,15 @@ class ESN(nn.Module):
 
         if self.readout_training == 'cholesky':
             # Solve (X^T X + λI) W = X^T y using Cholesky decomposition
-            W = torch.cholesky_solve(self.XTy,
-                           self.XTX + self.lambda_reg * torch.eye(
-                               self.XTX.size(0), device=self.XTX.device)).t()
+            A = self.XTX + self.lambda_reg * torch.eye(
+                self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            try:
+                L = torch.linalg.cholesky(A)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "Cholesky decomposition failed. Please set lambda_reg > 0."
+                ) from exc
+            W = torch.cholesky_solve(self.XTy, L).t()
             # Clear accumulated statistics
             self.XTX = None
             self.XTy = None
@@ -383,17 +391,12 @@ class ESN(nn.Module):
             
         elif self.readout_training == 'inv':
             # Solve (X^T X + λI) W = X^T y using matrix inversion
-            I = (self.lambda_reg * torch.eye(self.XTX.size(0))).to(
-                self.XTX.device)
-            A = self.XTX + I
-            
-            # Check matrix rank and use appropriate solver
-            X_rank = torch.linalg.matrix_rank(A).item()
-            if X_rank == self.X.size(0):
-                W = torch.mm(torch.inverse(A), self.XTy).t()
-            else:
-                # Use pseudoinverse for singular matrices
-                W = torch.mm(torch.pinverse(A), self.XTy).t()
+            A = self.XTX + self.lambda_reg * torch.eye(
+                self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            try:
+                W = torch.linalg.solve(A, self.XTy).t()
+            except RuntimeError:
+                W = (torch.linalg.pinv(A) @ self.XTy).t()
 
             # Set learned parameters and clear statistics
             self.readout.bias = nn.Parameter(W[:, 0])
@@ -416,3 +419,6 @@ class ESN(nn.Module):
         """
         self.reservoir.reset_parameters()
         self.readout.reset_parameters()
+        self.XTX = None
+        self.XTy = None
+        self.X = None

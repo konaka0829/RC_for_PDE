@@ -114,13 +114,13 @@ def aggregate_output(output, output_steps):
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="MNIST ESN classifier")
     parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--hidden-size", type=int, default=1000)
+    parser.add_argument("--hidden-size", type=int, default=4000)
     parser.add_argument("--washout-rate", type=float, default=0.2)
     parser.add_argument("--eval-output-steps", choices=["mean", "last"], default="mean")
     parser.add_argument(
         "--sequence-mode",
         choices=["flat", "rows", "cols", "time_steps"],
-        default="flat",
+        default="cols",
     )
     parser.add_argument("--time-steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -129,9 +129,9 @@ def build_arg_parser():
     parser.add_argument("--readout-training", default="cholesky")
     parser.add_argument("--output-steps", choices=["all", "mean", "last"], default="mean")
     parser.add_argument("--spectral-radius", type=float, default=0.9)
-    parser.add_argument("--leaking-rate", type=float, default=1.0)
+    parser.add_argument("--leaking-rate", type=float, default=0.3)
     parser.add_argument("--w-ih-scale", type=float, default=1.0)
-    parser.add_argument("--lambda-reg", type=float, default=0.0)
+    parser.add_argument("--lambda-reg", type=float, default=1e-4)
     parser.add_argument("--density", type=float, default=1.0)
     parser.add_argument("--w-io", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -193,7 +193,8 @@ if __name__ == "__main__":
     model.to(device)
 
     # Fit the model
-    for batch in train_iter:
+    max_batches = int(os.environ.get("MNIST_MAX_BATCHES", "50"))
+    for batch_idx, batch in enumerate(train_iter, start=1):
         x, y = batch
         x = x.to(device)
         y = y.to(device)
@@ -203,6 +204,8 @@ if __name__ == "__main__":
         washout_list = [int(args.washout_rate * x.size(0))] * x.size(1)
 
         model(x, washout_list, None, target)
+        if max_batches and batch_idx >= max_batches:
+            break
 
     model.fit()
 
@@ -211,7 +214,7 @@ if __name__ == "__main__":
         tot_correct = 0
         tot_obs = 0
 
-        for batch in train_iter:
+        for batch_idx, batch in enumerate(train_iter, start=1):
             x, y = batch
             x = x.to(device)
             y = y.to(device)
@@ -223,6 +226,8 @@ if __name__ == "__main__":
             logits = aggregate_output(output, args.eval_output_steps)
             tot_obs += x.size(1)
             tot_correct += loss_fcn(logits, y)
+            if max_batches and batch_idx >= max_batches:
+                break
 
         print("Training accuracy:", tot_correct / tot_obs)
 
@@ -233,7 +238,7 @@ if __name__ == "__main__":
     viz_labels = None
     viz_preds = None
 
-    for batch in test_iter:
+    for batch_idx, batch in enumerate(test_iter, start=1):
         x, y = batch
         x = x.to(device)
         y = y.to(device)
@@ -250,6 +255,8 @@ if __name__ == "__main__":
             viz_images = x_images
             viz_labels = y.detach().cpu()
             viz_preds = torch.argmax(logits.detach().cpu(), dim=1)
+        if max_batches and batch_idx >= max_batches:
+            break
 
     print("Test accuracy:", tot_correct / tot_obs)
 
