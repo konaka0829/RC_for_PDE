@@ -19,6 +19,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 
+def save_figure(fig, out_dir, stem):
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out_dir / f"{stem}.{ext}", bbox_inches="tight")
+
+
 def apply_quick_defaults(args):
     args.L = 22.0
     args.Q = 64
@@ -187,13 +192,13 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    plt.figure(figsize=(6, 4))
+    fig = plt.figure(figsize=(6, 4))
     plt.plot(rmse_curve.detach().cpu().numpy())
     plt.xlabel("t")
     plt.ylabel("RMSE")
     plt.tight_layout()
-    plt.savefig(out_dir / "rmse_curve.png")
-    plt.close()
+    save_figure(fig, out_dir, "rmse_curve")
+    plt.close(fig)
 
     result = {
         "params": vars(args),
