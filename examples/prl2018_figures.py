@@ -12,6 +12,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from torchesn.nn import ParallelESN
+from torchesn.utils.experiment_profiles import (
+    config_to_namespace,
+    resolve_experiment_config,
+)
 from torchesn.utils.kuramoto_sivashinsky import simulate_ks
 
 matplotlib.use("Agg")
@@ -23,36 +27,7 @@ def save_figure(fig, out_dir, stem):
         fig.savefig(out_dir / f"{stem}.{ext}", bbox_inches="tight")
 
 
-def apply_paper_defaults(args):
-    args.hidden_size = 5000
-    args.T_train = 70000
-    args.spectral_radius = 0.6
-    args.sigma = 1.0
-    args.l = 6
-    args.kappa = 3
-    args.K = 30
-    args.tau = 1000
-    args.epsilon = 10
-    args.n_trials = 10
-
-
-def apply_quick_defaults(args):
-    args.Q = 64
-    args.g = 8
-    args.l = 2
-    args.hidden_size = 150
-    args.T_train = 400
-    args.T_eval = 200
-    args.K = 2
-    args.tau = 60
-    args.epsilon = 10
-    args.n_trials = 1
-    args.lambda_reg = max(args.lambda_reg, 1e-2)
-    if args.Q % args.g != 0:
-        args.Q = args.g * (args.Q // args.g)
-
-
-def build_model(args, mu, translation_invariant=False):
+def build_model(args, mu, device, dtype, translation_invariant=False):
     return ParallelESN(
         Q=args.Q,
         g=args.g,
@@ -68,7 +43,9 @@ def build_model(args, mu, translation_invariant=False):
         translation_invariant=translation_invariant,
         mu=mu,
         seed=args.seed,
-    )
+        sigma=args.sigma,
+        kappa=args.kappa,
+    ).to(device=device, dtype=dtype)
 
 
 def generate_ks(args, mu, total_steps):
@@ -85,12 +62,11 @@ def generate_ks(args, mu, total_steps):
     )
 
 
-def train_model(args, mu):
-    total_steps = args.T_train + args.T_eval + args.epsilon + args.tau + 1
-    data = generate_ks(args, mu, total_steps=total_steps)
-    u_train = torch.tensor(data[: args.T_train], dtype=torch.float32)
-    u_eval = torch.tensor(data[args.T_train :], dtype=torch.float32)
-    model = build_model(args, mu)
+def train_model(args, mu, device, dtype):
+    data = generate_ks(args, mu, total_steps=args.total_steps)
+    u_train = torch.tensor(data[: args.T_train], dtype=dtype, device=device)
+    u_eval = torch.tensor(data[args.T_train :], dtype=dtype, device=device)
+    model = build_model(args, mu, device=device, dtype=dtype)
     model.fit(u_train, washout=0)
     return model, u_eval
 
@@ -115,11 +91,8 @@ def plot_space_time(data, out_dir, stem, title):
 
 
 def fig2_single(args):
-    args.g = 1
-    args.l = 0
-    if args.quick:
-        apply_quick_defaults(args)
-    model, u_eval = train_model(args, mu=args.mu)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, u_eval = train_model(args, mu=args.mu, device=device, dtype=torch.float32)
     u_hist = u_eval[: args.epsilon + 1]
     pred = model.predict(u_hist, steps=args.tau, epsilon=args.epsilon)
     true = u_eval[args.epsilon + 1 : args.epsilon + 1 + args.tau]
@@ -135,12 +108,8 @@ def fig2_single(args):
 
 
 def fig4_parallel(args):
-    if args.quick:
-        apply_quick_defaults(args)
-        args.mu = 0.01
-        args.lam = 100.0
-        args.L = 44.0
-    model, u_eval = train_model(args, mu=args.mu)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, u_eval = train_model(args, mu=args.mu, device=device, dtype=torch.float32)
     u_hist = u_eval[: args.epsilon + 1]
     pred = model.predict(u_hist, steps=args.tau, epsilon=args.epsilon)
     true = u_eval[args.epsilon + 1 : args.epsilon + 1 + args.tau]
@@ -172,21 +141,12 @@ def fig4_parallel(args):
 
 
 def fig5_scaling(args):
-    if args.quick:
-        apply_quick_defaults(args)
-        args.L = 200.0
-        args.Q = 64
-        args.mu = 0.01
-        args.lam = 100.0
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    L_values = [200, 400, 800, 1600]
-    g_values = [64, 128, 256, 512]
-    if args.quick:
-        L_values = [100, 200]
-        g_values = [8, 16]
+    L_values = args.fig5_a_L_values
+    g_values = args.fig5_a_g_values
 
     dx_base = 200.0 / 512.0
     curves = []
@@ -199,7 +159,9 @@ def fig5_scaling(args):
         args.L = float(L)
         args.g = int(g)
         args.Q = int(Q)
-        model, u_eval = train_model(args, mu=args.mu)
+        args.q = args.Q // args.g
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, u_eval = train_model(args, mu=args.mu, device=device, dtype=torch.float32)
         curve = rmse_curve(model, u_eval, args)
         curves.append(curve)
         settings.append({"L": L, "g": g, "Q": Q})
@@ -214,17 +176,19 @@ def fig5_scaling(args):
     save_figure(fig, out_dir, "fig5_a")
     plt.close(fig)
 
-    args.L = 200.0
-    args.Q = 512 if not args.quick else 64
-    args.g = 64 if not args.quick else 8
-    g_values = [1, 2, 4, 8, 16, 32, 64] if not args.quick else [1, 2, 4, 8]
+    args.L = args.fig5_b_L
+    args.Q = args.fig5_b_Q
+    args.g = 64
+    g_values = args.fig5_b_g_values
     curves = []
     settings = []
     for g in g_values:
         if args.Q % g != 0:
             continue
         args.g = g
-        model, u_eval = train_model(args, mu=args.mu)
+        args.q = args.Q // args.g
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, u_eval = train_model(args, mu=args.mu, device=device, dtype=torch.float32)
         curve = rmse_curve(model, u_eval, args)
         curves.append(curve)
         settings.append({"g": g})
@@ -244,20 +208,16 @@ def fig5_scaling(args):
 
 
 def fig6_shared_weights(args):
-    if args.quick:
-        apply_quick_defaults(args)
-        args.L = 44.0
-        args.Q = 64
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     curves = {}
-    for mu in [0.0, 0.01]:
-        model = build_model(args, mu=mu, translation_invariant=False)
-        data = generate_ks(args, mu=mu, total_steps=args.T_train + args.T_eval + 1)
-        u_train = torch.tensor(data[: args.T_train], dtype=torch.float32)
-        u_eval = torch.tensor(data[args.T_train :], dtype=torch.float32)
+    for mu in args.mu_values:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = build_model(args, mu=mu, device=device, dtype=torch.float32, translation_invariant=False)
+        data = generate_ks(args, mu=mu, total_steps=args.total_steps)
+        u_train = torch.tensor(data[: args.T_train], dtype=torch.float32, device=device)
+        u_eval = torch.tensor(data[args.T_train :], dtype=torch.float32, device=device)
         model.fit(u_train, washout=0)
         curves[f"independent_mu_{mu}"] = rmse_curve(model, u_eval, args)
 
@@ -265,7 +225,7 @@ def fig6_shared_weights(args):
             print("Fig6: translation_invariant disabled for mu!=0 (independent only).")
             continue
 
-        shared = build_model(args, mu=mu, translation_invariant=True)
+        shared = build_model(args, mu=mu, device=device, dtype=torch.float32, translation_invariant=True)
         shared.fit(u_train, washout=0)
         curves[f"shared_mu_{mu}"] = rmse_curve(shared, u_eval, args)
 
@@ -281,37 +241,38 @@ def fig6_shared_weights(args):
 
 
 def add_common_args(parser):
-    parser.add_argument("--L", type=float, default=22.0)
-    parser.add_argument("--Q", type=int, default=64)
-    parser.add_argument("--dt", type=float, default=0.25)
-    parser.add_argument("--mu", type=float, default=0.0)
-    parser.add_argument("--lam", type=float, default=100.0)
-    parser.add_argument("--burn-in", type=int, default=0)
+    parser.add_argument("--L", type=float, default=None)
+    parser.add_argument("--Q", type=int, default=None)
+    parser.add_argument("--dt", type=float, default=None)
+    parser.add_argument("--mu", type=float, default=None)
+    parser.add_argument("--lam", type=float, default=None)
+    parser.add_argument("--burn-in", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
 
-    parser.add_argument("--g", type=int, default=1)
-    parser.add_argument("--l", type=int, default=0)
-    parser.add_argument("--hidden-size", type=int, default=500)
-    parser.add_argument("--spectral-radius", type=float, default=0.6)
-    parser.add_argument("--sigma", type=float, default=1.0)
-    parser.add_argument("--kappa", type=int, default=3)
-    parser.add_argument("--density", type=float, default=1.0)
+    parser.add_argument("--g", type=int, default=None)
+    parser.add_argument("--l", type=int, default=None)
+    parser.add_argument("--hidden-size", type=int, default=None)
+    parser.add_argument("--spectral-radius", type=float, default=None)
+    parser.add_argument("--sigma", type=float, default=None)
+    parser.add_argument("--kappa", type=int, default=None)
+    parser.add_argument("--density", type=float, default=None)
     parser.add_argument("--leaking-rate", type=float, default=1.0)
 
-    parser.add_argument("--readout-training", type=str, default="cholesky")
-    parser.add_argument("--lambda-reg", type=float, default=1e-4)
-    parser.add_argument("--readout-features", type=str, default="linear_and_square")
+    parser.add_argument("--readout-training", type=str, default=None)
+    parser.add_argument("--lambda-reg", type=float, default=None)
+    parser.add_argument("--readout-features", type=str, default=None)
 
-    parser.add_argument("--T-train", type=int, default=1000)
-    parser.add_argument("--T-eval", type=int, default=500)
-    parser.add_argument("--epsilon", type=int, default=10)
-    parser.add_argument("--tau", type=int, default=100)
-    parser.add_argument("--K", type=int, default=2)
-    parser.add_argument("--n-trials", type=int, default=1)
+    parser.add_argument("--T-train", type=int, default=None)
+    parser.add_argument("--T-eval", type=int, default=None)
+    parser.add_argument("--epsilon", type=int, default=None)
+    parser.add_argument("--tau", type=int, default=None)
+    parser.add_argument("--K", type=int, default=None)
+    parser.add_argument("--n-trials", type=int, default=None)
 
     parser.add_argument("--out-dir", type=str, default="examples/figures/prl2018")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--paper-defaults", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
 
 
 def main():
@@ -329,19 +290,23 @@ def main():
     add_common_args(fig6)
 
     args = parser.parse_args()
-    if args.paper_defaults:
-        apply_paper_defaults(args)
-    if args.quick:
-        apply_quick_defaults(args)
+    cfg = resolve_experiment_config(args, mode=args.command)
 
+    if args.dry_run:
+        print(json.dumps(cfg, indent=2))
+        return
+
+    resolved = config_to_namespace(cfg)
+    resolved.seed = args.seed
+    resolved.out_dir = args.out_dir
     if args.command == "fig2_single":
-        fig2_single(args)
+        fig2_single(resolved)
     elif args.command == "fig4_parallel":
-        fig4_parallel(args)
+        fig4_parallel(resolved)
     elif args.command == "fig5_scaling":
-        fig5_scaling(args)
+        fig5_scaling(resolved)
     elif args.command == "fig6_shared_weights":
-        fig6_shared_weights(args)
+        fig6_shared_weights(resolved)
 
 
 if __name__ == "__main__":
