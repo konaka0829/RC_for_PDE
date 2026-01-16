@@ -486,15 +486,23 @@ class ESN(nn.Module):
 
         if self.readout_training == 'cholesky':
             # Solve (X^T X + λI) W = X^T y using Cholesky decomposition
-            A = self.XTX + self.lambda_reg * torch.eye(
-                self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            eye = torch.eye(self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            A = self.XTX + self.lambda_reg * eye
             try:
                 L = torch.linalg.cholesky(A)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Cholesky decomposition failed. Please set lambda_reg > 0."
-                ) from exc
-            W = torch.cholesky_solve(self.XTy, L).t()
+                W = torch.cholesky_solve(self.XTy, L).t()
+            except RuntimeError:
+                jitter = 1e-6 * eye
+                try:
+                    L = torch.linalg.cholesky(A + jitter)
+                    W = torch.cholesky_solve(self.XTy, L).t()
+                except RuntimeError:
+                    A_jitter = A + jitter
+                    try:
+                        W = torch.linalg.solve(A_jitter, self.XTy).t()
+                    except RuntimeError:
+                        W = (torch.linalg.pinv(A_jitter) @ self.XTy).t()
+
             # Clear accumulated statistics
             self.XTX = None
             self.XTy = None
