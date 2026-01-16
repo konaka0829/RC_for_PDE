@@ -48,6 +48,13 @@ class ESN(nn.Module):
             - 'mean': Average over time (for sequence classification)
             - 'last': Use only final timestep (for sequence classification)
             Default: 'all'
+        readout_features (str, optional): Feature expansion for the readout.
+            Options:
+            - 'linear': Use linear features only.
+            - 'linear_and_square': Concatenate squared reservoir states.
+            When w_io=True, squared input features are not added; only
+            reservoir states are squared.
+            Default: 'linear'
     
     Examples:
         >>> # Time series prediction
@@ -138,7 +145,8 @@ class ESN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1,
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
-                 w_io=False, readout_training='svd', output_steps='all'):
+                 w_io=False, readout_training='svd', output_steps='all',
+                 readout_features='linear'):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -176,11 +184,19 @@ class ESN(nn.Module):
                                    self.w_ih_scale, density,
                                    batch_first=batch_first)
 
-        if w_io:
-            self.readout = nn.Linear(input_size + hidden_size * num_layers,
-                                     output_size)
+        if readout_features in {'linear', 'linear_and_square'}:
+            self.readout_features = readout_features
         else:
-            self.readout = nn.Linear(hidden_size * num_layers, output_size)
+            raise ValueError("Unknown readout features '{}'".format(
+                readout_features))
+
+        base_readout_size = hidden_size * num_layers
+        if w_io:
+            base_readout_size += input_size
+        if readout_features == 'linear_and_square':
+            base_readout_size += hidden_size * num_layers
+
+        self.readout = nn.Linear(base_readout_size, output_size)
 
         if output_steps in {'all', 'mean', 'last'}:
             self.output_steps = output_steps
@@ -216,30 +232,32 @@ class ESN(nn.Module):
             is_packed = isinstance(input, PackedSequence)
 
             # Forward through reservoir layers (fixed weights)
-            output, hidden = self.reservoir(input, h_0)
+            reservoir_output, hidden = self.reservoir(input, h_0)
             
             # Unpack if needed and get sequence lengths
             if is_packed:
-                output, seq_lengths = pad_packed_sequence(output,
+                reservoir_output, seq_lengths = pad_packed_sequence(reservoir_output,
                                                           batch_first=self.batch_first)
             else:
                 if self.batch_first:
-                    seq_lengths = output.size(0) * [output.size(1)]
+                    seq_lengths = reservoir_output.size(0) * [reservoir_output.size(1)]
                 else:
-                    seq_lengths = output.size(1) * [output.size(0)]
+                    seq_lengths = reservoir_output.size(1) * [reservoir_output.size(0)]
 
             # Ensure time-first format for processing
             if self.batch_first:
-                output = output.transpose(0, 1)
+                reservoir_output = reservoir_output.transpose(0, 1)
 
             # Apply washout: remove initial timesteps to stabilize dynamics
-            output, seq_lengths = washout_tensor(output, washout, seq_lengths)
+            reservoir_output, seq_lengths = washout_tensor(reservoir_output, washout, seq_lengths)
 
             # Optionally concatenate input features to reservoir output
             if self.w_io:
                 if is_packed:
-                    input, input_lengths = pad_packed_sequence(input,
-                                                          batch_first=self.batch_first)
+                    input, input_lengths = pad_packed_sequence(
+                        input,
+                        batch_first=self.batch_first,
+                    )
                 else:
                     if self.batch_first:
                         input_lengths = [input.size(1)] * input.size(0)
@@ -250,13 +268,23 @@ class ESN(nn.Module):
                     input = input.transpose(0, 1)
 
                 input, _ = washout_tensor(input, washout, input_lengths)
-                output = torch.cat([input, output], -1)
+                readout_linear = torch.cat([input, reservoir_output], -1)
+            else:
+                readout_linear = reservoir_output
+
+            if self.readout_features == 'linear_and_square':
+                readout_features = torch.cat(
+                    [readout_linear, reservoir_output ** 2],
+                    dim=-1,
+                )
+            else:
+                readout_features = readout_linear
 
             # Branch based on training method
             if self.readout_training == 'gd' or target is None:
                 # Online training or inference: use current readout weights
                 with torch.enable_grad():
-                    output = self.readout(output)
+                    output = self.readout(readout_features)
 
                     # Zero out padded positions for packed sequences
                     if is_packed:
@@ -277,26 +305,30 @@ class ESN(nn.Module):
 
             else:
                 # Offline training: accumulate statistics for ridge regression
-                batch_size = output.size(1)
+                batch_size = readout_features.size(1)
 
                 # Prepare design matrix X with bias column
-                X = torch.ones(target.size(0), 1 + output.size(2),
-                               device=target.device, dtype=output.dtype)
+                X = torch.ones(
+                    target.size(0),
+                    1 + readout_features.size(2),
+                    device=target.device,
+                    dtype=readout_features.dtype,
+                )
                 row = 0
                 
                 # Fill design matrix based on output aggregation method
                 for s in range(batch_size):
                     if self.output_steps == 'all':
                         # Use all timesteps for sequence-to-sequence tasks
-                        X[row:row + seq_lengths[s], 1:] = output[:seq_lengths[s], s]
+                        X[row:row + seq_lengths[s], 1:] = readout_features[:seq_lengths[s], s]
                         row += seq_lengths[s]
                     elif self.output_steps == 'mean':
                         # Use temporal mean for classification
-                        X[row, 1:] = torch.mean(output[:seq_lengths[s], s], 0)
+                        X[row, 1:] = torch.mean(readout_features[:seq_lengths[s], s], 0)
                         row += 1
                     elif self.output_steps == 'last':
                         # Use final timestep for classification
-                        X[row, 1:] = output[seq_lengths[s] - 1, s]
+                        X[row, 1:] = readout_features[seq_lengths[s] - 1, s]
                         row += 1
                 assert row == target.size(0)
 
@@ -335,6 +367,92 @@ class ESN(nn.Module):
                         self.XTy += torch.mm(X.t(), target)
 
                 return None, None
+
+    def step(self, input_t, washout=None, hx=None):
+        """Advance the ESN by a single timestep.
+
+        Args:
+            input_t (Tensor): Input at current timestep, shape (batch, input_size).
+            washout (int or list of int, optional): Washout length(s). Must be 0 if
+                provided for step-wise usage.
+            hx (Tensor, optional): Previous hidden state, shape
+                (num_layers, batch, hidden_size). If None, initialized to zeros.
+
+        Returns:
+            tuple: (output, hx_next) where:
+                - output: Readout prediction, shape (batch, output_size)
+                - hx_next: Next hidden state, shape (num_layers, batch, hidden_size)
+        """
+        if input_t.dim() != 2:
+            raise RuntimeError(
+                'input_t must have 2 dimensions (batch, input_size), got {}'.format(
+                    input_t.dim()))
+        if washout is not None:
+            if isinstance(washout, int):
+                if washout != 0:
+                    raise ValueError("washout must be 0 for step-wise usage.")
+            else:
+                if any(w > 0 for w in washout):
+                    raise ValueError("washout values must be 0 for step-wise usage.")
+
+        with torch.no_grad():
+            hx_next = self.reservoir.step(input_t, hx)
+            batch_size = input_t.size(0)
+            reservoir_output = hx_next.transpose(0, 1).reshape(
+                batch_size, self.hidden_size * self.num_layers)
+
+            if self.w_io:
+                readout_linear = torch.cat([input_t, reservoir_output], dim=-1)
+            else:
+                readout_linear = reservoir_output
+
+            if self.readout_features == 'linear_and_square':
+                readout_features = torch.cat(
+                    [readout_linear, reservoir_output ** 2],
+                    dim=-1,
+                )
+            else:
+                readout_features = readout_linear
+
+        with torch.enable_grad():
+            output = self.readout(readout_features)
+
+        return output, hx_next
+
+    def predict_autoregressive(self, init_u, steps, hx=None):
+        """Run closed-loop autoregressive prediction.
+
+        Args:
+            init_u (Tensor): Initial input, shape (batch, input_size) or
+                (input_size,).
+            steps (int): Number of autoregressive steps to generate.
+            hx (Tensor, optional): Initial hidden state.
+
+        Returns:
+            Tensor: Predictions of shape (steps, batch, output_size).
+        """
+        if steps <= 0:
+            raise ValueError("steps must be a positive integer.")
+        if self.output_size != self.input_size:
+            raise ValueError(
+                "output_size must equal input_size for autoregressive prediction.")
+
+        if init_u.dim() == 1:
+            input_t = init_u.unsqueeze(0)
+        elif init_u.dim() == 2:
+            input_t = init_u
+        else:
+            raise RuntimeError(
+                'init_u must have 1 or 2 dimensions, got {}'.format(init_u.dim()))
+
+        outputs = []
+        with torch.no_grad():
+            for _ in range(steps):
+                output, hx = self.step(input_t, hx=hx)
+                outputs.append(output)
+                input_t = output
+
+        return torch.stack(outputs, dim=0)
 
     def fit(self):
         """Solve the accumulated linear system for offline readout training.

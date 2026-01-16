@@ -6,6 +6,35 @@ Author: Stefano Nardo
 import torch
 
 
+def estimate_spectral_radius_power_iteration(W, n_iter=50):
+    """Estimate the spectral radius (max |eigenvalue|) via power iteration.
+
+    Args:
+        W (Tensor): Square 2D tensor.
+        n_iter (int): Number of power iterations. Default: 50
+
+    Returns:
+        float: Estimated spectral radius.
+    """
+    if W.dim() != 2 or W.size(0) != W.size(1):
+        raise ValueError("W must be a square 2D tensor.")
+
+    v = torch.randn(W.size(1), device=W.device, dtype=W.dtype)
+    v_norm = torch.linalg.norm(v)
+    if v_norm == 0:
+        return 0.0
+    v = v / v_norm
+
+    for _ in range(n_iter):
+        v = torch.mv(W, v)
+        v_norm = torch.linalg.norm(v)
+        if v_norm == 0:
+            return 0.0
+        v = v / v_norm
+
+    return float(torch.linalg.norm(torch.mv(W, v)))
+
+
 def prepare_target(target, seq_lengths, washout, batch_first=False):
     """Preprocess target sequences for offline ESN training methods.
     

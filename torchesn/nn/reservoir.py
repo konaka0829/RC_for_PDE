@@ -1,8 +1,11 @@
+import math
 import re
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import PackedSequence
+
+from ..utils import estimate_spectral_radius_power_iteration
 
 
 def apply_permutation(tensor, permutation, dim=1):
@@ -145,24 +148,45 @@ class Reservoir(nn.Module):
                 value *= self.w_ih_scale[0]  # First element is bias scale
             elif re.fullmatch('weight_hh_l[0-9]*', key):
                 # Recurrent weights: the core of reservoir dynamics
-                w_hh = torch.Tensor(self.hidden_size * self.hidden_size)
-                w_hh.uniform_(-1, 1)
-                
-                # Apply sparsity: randomly zero out connections
-                if self.density < 1:
-                    zero_weights = torch.randperm(
-                        int(self.hidden_size * self.hidden_size))
-                    zero_weights = zero_weights[
-                                   :int(
-                                       self.hidden_size * self.hidden_size * (
-                                                   1 - self.density))]
-                    w_hh[zero_weights] = 0
-                
-                # Reshape and scale to desired spectral radius
-                w_hh = w_hh.view(self.hidden_size, self.hidden_size)
-                abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
-                # Scale largest eigenvalue to spectral_radius
-                weight_dict[key] = w_hh * (self.spectral_radius / torch.max(abs_eigs))
+                max_attempts = 3
+                for attempt in range(max_attempts):
+                    w_hh_flat = torch.empty(
+                        self.hidden_size * self.hidden_size,
+                        device=value.device,
+                    )
+                    w_hh_flat.uniform_(-1, 1)
+
+                    # Apply sparsity: randomly zero out connections
+                    if self.density < 1:
+                        zero_weights = torch.randperm(
+                            int(self.hidden_size * self.hidden_size),
+                            device=w_hh_flat.device,
+                        )
+                        zero_weights = zero_weights[
+                                       :int(
+                                           self.hidden_size * self.hidden_size * (
+                                               1 - self.density))]
+                        w_hh_flat[zero_weights] = 0
+
+                    # Reshape and scale to desired spectral radius
+                    w_hh = w_hh_flat.view(self.hidden_size, self.hidden_size)
+                    if self.hidden_size <= 256:
+                        abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
+                        spectral_estimate = torch.max(abs_eigs)
+                        is_valid = torch.isfinite(spectral_estimate) and spectral_estimate > 0
+                    else:
+                        spectral_estimate = estimate_spectral_radius_power_iteration(w_hh)
+                        is_valid = math.isfinite(spectral_estimate) and spectral_estimate > 0
+
+                    if is_valid:
+                        weight_dict[key] = w_hh * (
+                            self.spectral_radius / spectral_estimate)
+                        break
+
+                    if attempt == max_attempts - 1:
+                        raise RuntimeError(
+                            "Failed to estimate spectral radius for reservoir weights."
+                        )
 
         self.load_state_dict(weight_dict)
 
@@ -233,6 +257,63 @@ class Reservoir(nn.Module):
         expected_hidden_size = self.get_expected_hidden_size(input, batch_sizes)
 
         self.check_hidden_size(hidden, expected_hidden_size)
+
+    def step(self, input_t, hx):
+        """Advance the reservoir by a single timestep.
+
+        Args:
+            input_t (Tensor): Input at current timestep, shape (batch, input_size).
+            hx (Tensor or None): Previous hidden state, shape
+                (num_layers, batch, hidden_size). If None, initialized to zeros.
+
+        Returns:
+            Tensor: Next hidden state, shape (num_layers, batch, hidden_size).
+
+        Note:
+            This method expects time-unrolled inputs, regardless of batch_first.
+        """
+        if input_t.dim() != 2:
+            raise RuntimeError(
+                'input_t must have 2 dimensions (batch, input_size), got {}'.format(
+                    input_t.dim()))
+        if self.input_size != input_t.size(-1):
+            raise RuntimeError(
+                'input_t.size(-1) must be equal to input_size. Expected {}, got {}'.format(
+                    self.input_size, input_t.size(-1)))
+
+        batch_size = input_t.size(0)
+        if hx is None:
+            hx = input_t.new_zeros(self.num_layers, batch_size, self.hidden_size,
+                                   requires_grad=False)
+        else:
+            expected_hidden_size = (self.num_layers, batch_size, self.hidden_size)
+            self.check_hidden_size(hx, expected_hidden_size)
+
+        if self.mode == 'RES_TANH':
+            cell = ResTanhCell
+        elif self.mode == 'RES_RELU':
+            cell = ResReLUCell
+        elif self.mode == 'RES_ID':
+            cell = ResIdCell
+        else:
+            raise ValueError("Unknown mode '{}'".format(self.mode))
+
+        next_hidden = []
+        layer_input = input_t
+        for layer in range(self.num_layers):
+            w_ih = getattr(self, 'weight_ih_l{}{}'.format(layer, ''))
+            w_hh = getattr(self, 'weight_hh_l{}{}'.format(layer, ''))
+            if self.bias:
+                b_ih = getattr(self, 'bias_ih_l{}{}'.format(layer, ''))
+            else:
+                b_ih = None
+
+            h_prev = hx[layer]
+            h_next = cell(layer_input, h_prev, self.leaking_rate, w_ih, w_hh, b_ih)
+            next_hidden.append(h_next)
+            layer_input = h_next
+
+        return torch.stack(next_hidden, dim=0)
 
     def permute_hidden(self, hx, permutation):
         """Apply permutation to hidden state for PackedSequence compatibility.
