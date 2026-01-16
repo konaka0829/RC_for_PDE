@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import PackedSequence
+from ..utils import estimate_spectral_radius_power_iteration
 
 
 def apply_permutation(tensor, permutation, dim=1):
@@ -160,9 +161,19 @@ class Reservoir(nn.Module):
                 
                 # Reshape and scale to desired spectral radius
                 w_hh = w_hh.view(self.hidden_size, self.hidden_size)
-                abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
-                # Scale largest eigenvalue to spectral_radius
-                weight_dict[key] = w_hh * (self.spectral_radius / torch.max(abs_eigs))
+                if self.hidden_size >= 256:
+                    spectral_estimate = estimate_spectral_radius_power_iteration(
+                        w_hh, n_iter=50
+                    )
+                else:
+                    abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
+                    spectral_estimate = torch.max(abs_eigs)
+
+                if spectral_estimate == 0:
+                    weight_dict[key] = w_hh
+                else:
+                    # Scale largest eigenvalue to spectral_radius
+                    weight_dict[key] = w_hh * (self.spectral_radius / spectral_estimate)
 
         self.load_state_dict(weight_dict)
 
@@ -323,6 +334,57 @@ class Reservoir(nn.Module):
             
         # Restore original batch ordering for hidden state
         return output, self.permute_hidden(hidden, unsorted_indices)
+
+    def step(self, input_t, hx=None):
+        """Single-step reservoir update.
+
+        Args:
+            input_t (Tensor): Input at current timestep, shape (batch, input_size)
+            hx (Tensor, optional): Hidden state of shape
+                (num_layers, batch, hidden_size). Defaults to zeros.
+
+        Returns:
+            Tensor: Updated hidden state hx_next, same shape as hx.
+        """
+        if input_t.dim() != 2:
+            raise RuntimeError(
+                'input_t must have 2 dimensions (batch, input_size), got {}'.format(
+                    input_t.dim()))
+        if self.input_size != input_t.size(-1):
+            raise RuntimeError(
+                'input_t.size(-1) must be equal to input_size. Expected {}, got {}'.format(
+                    self.input_size, input_t.size(-1)))
+
+        batch_size = input_t.size(0)
+        if hx is None:
+            hx = input_t.new_zeros(self.num_layers, batch_size,
+                                   self.hidden_size, requires_grad=False)
+        else:
+            self.check_hidden_size(
+                hx, (self.num_layers, batch_size, self.hidden_size))
+
+        if self.mode == 'RES_TANH':
+            cell = ResTanhCell
+        elif self.mode == 'RES_RELU':
+            cell = ResReLUCell
+        elif self.mode == 'RES_ID':
+            cell = ResIdCell
+        else:
+            raise RuntimeError("Unknown reservoir mode '{}'".format(self.mode))
+
+        next_hidden = []
+        layer_input = input_t
+        for layer, weights in enumerate(self.all_weights):
+            if self.bias:
+                w_ih, w_hh, b_ih = weights
+            else:
+                w_ih, w_hh = weights
+                b_ih = None
+            hy = cell(layer_input, hx[layer], self.leaking_rate, w_ih, w_hh, b_ih)
+            next_hidden.append(hy)
+            layer_input = hy
+
+        return torch.stack(next_hidden, 0)
 
     def extra_repr(self):
         s = '({input_size}, {hidden_size}'
