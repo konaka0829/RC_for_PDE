@@ -13,7 +13,8 @@ Pathak et al. (PRL 2018) に基づく Parallel ESN、Kuramoto–Sivashinsky (KS)
 3. [KSデータ生成](#ksデータ生成)
 4. [PRL 2018 図の再現](#prl-2018-図の再現)
 5. [KS評価（RMSE曲線）](#ks評価rmse曲線)
-6. [テスト実行](#テスト実行)
+6. [条件解決とdry-run](#条件解決とdry-run)
+7. [テスト実行](#テスト実行)
 
 ---
 
@@ -114,6 +115,7 @@ python examples/prl2018_figures.py fig6_shared_weights --quick --out-dir /tmp/pr
 **ポイント**
 - `--quick` はCI用の短時間設定です。  
   論文再現を狙う場合は `--paper-defaults` を利用してください。
+- `--dry-run` を付けると、重い計算をせずに解決済み設定をJSONで出力します。
 - 図は指定した `--out-dir` に保存されます（デフォルト: `examples/figures/prl2018`）。
 
 ### 出力ファイル
@@ -135,11 +137,16 @@ python examples/prl2018_figures.py fig6_shared_weights --quick --out-dir /tmp/pr
 python examples/eval_ks_rmse.py --quick --out-dir /tmp/ks_eval
 ```
 
+### paper-defaults（論文条件）
+```bash
+python examples/eval_ks_rmse.py --paper-defaults --out-dir /tmp/ks_eval
+```
+
 ### 出力
 出力は指定した `--out-dir` に保存されます（デフォルト: `examples/figures/ks_eval`）。
 
 - `rmse_curve.png` / `rmse_curve.pdf` / `rmse_curve.svg` : RMSE 曲線
-- `rmse_curve.json` : パラメータと RMSE 配列
+- `rmse_curve.json` : 解決済み設定（config）と RMSE 配列
 
 ### 代表パラメータ例（論文規模）
 ```bash
@@ -148,6 +155,20 @@ python examples/eval_ks_rmse.py \
   --T-train 70000 --K 30 --tau 1000 --epsilon 10 --n-trials 10 \
   --g 64 --l 6 --hidden-size 5000 --spectral-radius 0.6 \
   --lambda-reg 1e-4 --readout-features linear_and_square
+```
+
+---
+
+## 条件解決とdry-run
+
+`examples/prl2018_figures.py` と `examples/eval_ks_rmse.py` は共通の条件解決ロジックを持ち、  
+`--paper-defaults` / `--quick` の優先順位と導出パラメータ（`q`, `T_eval`, `total_steps`,
+`effective_density` など）を統一的に解決します。
+
+### dry-run（JSONの確認）
+```bash
+python examples/prl2018_figures.py fig4_parallel --paper-defaults --dry-run
+python examples/eval_ks_rmse.py --paper-defaults --dry-run
 ```
 
 ---

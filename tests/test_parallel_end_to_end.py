@@ -60,3 +60,32 @@ def test_parallel_matches_esn_when_single_segment():
     esn_pred = esn.predict_autoregressive(u_hist[-1], steps=steps).squeeze(1)
 
     assert torch.allclose(parallel_pred, esn_pred, atol=1e-6, rtol=1e-5)
+
+
+def test_parallel_matches_esn_with_warmup():
+    torch.manual_seed(0)
+
+    Q = 5
+    epsilon = 3
+    steps = 4
+    u_hist = torch.randn(epsilon + 1, Q)
+
+    parallel = ParallelESN(
+        Q=Q,
+        g=1,
+        l=0,
+        hidden_size=6,
+        readout_training="gd",
+        readout_features="linear",
+        translation_invariant=True,
+    )
+    esn = parallel.esn_shared
+
+    hx = None
+    for t in range(epsilon):
+        _, hx = esn.step(u_hist[t].unsqueeze(0), hx=hx)
+
+    parallel_pred = parallel.predict(u_hist, steps=steps, epsilon=epsilon)
+    esn_pred = esn.predict_autoregressive(u_hist[-1], steps=steps, hx=hx).squeeze(1)
+
+    assert torch.allclose(parallel_pred, esn_pred, atol=1e-6, rtol=1e-5)

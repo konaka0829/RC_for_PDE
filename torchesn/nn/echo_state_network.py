@@ -146,7 +146,7 @@ class ESN(nn.Module):
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
                  w_io=False, readout_training='svd', output_steps='all',
-                 readout_features='linear'):
+                 readout_features='linear', sigma=None, kappa=None):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -164,6 +164,10 @@ class ESN(nn.Module):
         self.batch_first = batch_first
         self.leaking_rate = leaking_rate
         self.spectral_radius = spectral_radius
+        if sigma is not None:
+            w_ih_scale = sigma
+        if kappa is not None:
+            density = min(1.0, kappa / float(hidden_size))
         if type(w_ih_scale) != torch.Tensor:
             self.w_ih_scale = torch.ones(input_size + 1)
             self.w_ih_scale *= w_ih_scale
@@ -283,7 +287,8 @@ class ESN(nn.Module):
             # Branch based on training method
             if self.readout_training == 'gd' or target is None:
                 # Online training or inference: use current readout weights
-                with torch.enable_grad():
+                grad_enabled = self.readout_training == 'gd' and torch.is_grad_enabled()
+                with torch.set_grad_enabled(grad_enabled):
                     output = self.readout(readout_features)
 
                     # Zero out padded positions for packed sequences
@@ -348,7 +353,7 @@ class ESN(nn.Module):
                     idx = s > 1e-15  # same default value as scipy.linalg.pinv
                     s_nnz = s[idx][:, None]
                     UTy = torch.mm(U.t(), target)
-                    d = torch.zeros(s.size(0), 1, device=X.device)
+                    d = torch.zeros(s.size(0), 1, device=X.device, dtype=X.dtype)
                     d[idx] = s_nnz / (s_nnz ** 2 + self.lambda_reg)
                     d_UT_y = d * UTy
                     W = torch.mm(Vh.t(), d_UT_y).t()
@@ -414,7 +419,8 @@ class ESN(nn.Module):
             else:
                 readout_features = readout_linear
 
-        with torch.enable_grad():
+        grad_enabled = self.readout_training == 'gd' and torch.is_grad_enabled()
+        with torch.set_grad_enabled(grad_enabled):
             output = self.readout(readout_features)
 
         return output, hx_next

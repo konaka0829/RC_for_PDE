@@ -86,7 +86,12 @@ def prepare_target(target, seq_lengths, washout, batch_first=False):
     train_len = sum(torch.tensor(seq_lengths) - torch.tensor(washout)).item()
 
     # Allocate output tensor
-    new_target = torch.zeros(train_len, target_dim, device=target.device)
+    new_target = torch.zeros(
+        train_len,
+        target_dim,
+        device=target.device,
+        dtype=target.dtype,
+    )
 
     # Concatenate all valid (post-washout) target values
     idx = 0

@@ -50,3 +50,20 @@ def test_predict_autoregressive_shapes_and_finite():
 
     assert output.shape == (steps, batch_size, output_size)
     assert torch.isfinite(output).all()
+
+
+def test_step_respects_no_grad_context():
+    torch.manual_seed(0)
+
+    model = ESN(
+        input_size=2,
+        hidden_size=4,
+        output_size=2,
+        readout_training="gd",
+    )
+    input_t = torch.randn(1, 2)
+
+    with torch.no_grad():
+        output, _ = model.step(input_t)
+
+    assert not output.requires_grad
