@@ -152,3 +152,31 @@ def washout_tensor(tensor, washout, seq_lengths, bidirectional=False, batch_firs
         max_len = max(seq_lengths).item()
 
     return tensor[:max_len], seq_lengths
+
+
+def estimate_spectral_radius_power_iteration(W, n_iter=50):
+    """Estimate spectral radius using power iteration.
+
+    Args:
+        W (Tensor): Square weight matrix.
+        n_iter (int, optional): Number of power iterations. Default: 50.
+
+    Returns:
+        Tensor: Estimated spectral radius (largest magnitude eigenvalue).
+    """
+    if W.dim() != 2 or W.size(0) != W.size(1):
+        raise ValueError("W must be a square 2D tensor.")
+    if n_iter <= 0:
+        raise ValueError("n_iter must be a positive integer.")
+
+    v = torch.randn(W.size(0), device=W.device, dtype=W.dtype)
+    eps = torch.finfo(W.dtype).eps
+    spectral_radius = torch.tensor(0.0, device=W.device, dtype=W.dtype)
+    for _ in range(n_iter):
+        v = torch.mv(W, v)
+        norm = torch.linalg.vector_norm(v)
+        if norm <= eps:
+            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        v = v / norm
+        spectral_radius = norm
+    return spectral_radius
