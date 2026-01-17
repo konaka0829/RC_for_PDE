@@ -10,4 +10,5 @@ __author__ = 'Stefano Nardo'
 __email__ = 'stefano_nardo@msn.com'
 
 import torchesn.nn
+import torchesn.pde
 import torchesn.utils
