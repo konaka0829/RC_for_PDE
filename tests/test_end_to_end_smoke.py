@@ -59,6 +59,8 @@ def test_end_to_end_smoke(tmp_path: Path):
         "2",
         "--interval-stride",
         "50",
+        "--chunk-size",
+        "64",
         "--seed",
         "0",
     ]

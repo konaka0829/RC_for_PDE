@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -79,6 +80,9 @@ def main() -> None:
         filter_strength=args.filter_strength,
         filter_order=args.filter_order,
     )
+    if not np.isfinite(series).all():
+        bad_idx = np.argwhere(~np.isfinite(series))[0]
+        raise RuntimeError(f"Non-finite values detected at t={bad_idx[0]}, x={bad_idx[1]}")
 
     train_u = series[: args.train_steps]
     test_u = series[args.train_steps :]
@@ -100,7 +104,8 @@ def main() -> None:
         "filter_order": args.filter_order,
     }
 
-    np.savez(out_path, train_u=train_u, test_u=test_u, meta=np.array(meta, dtype=object))
+    meta_json = json.dumps(meta, sort_keys=True)
+    np.savez(out_path, train_u=train_u, test_u=test_u, meta_json=meta_json)
 
 
 if __name__ == "__main__":

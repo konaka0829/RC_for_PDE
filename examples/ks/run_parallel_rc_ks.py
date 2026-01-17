@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List
@@ -37,14 +38,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--device", type=str, default="cpu", help="Device for torch tensors")
     parser.add_argument("--dtype", type=str, choices=("float32", "float64"), default="float32")
+    parser.add_argument("--chunk-size", type=int, default=1024, help="Chunk size for ridge statistics")
     parser.add_argument("--plot-out", type=str, default=None, help="Optional path to save RMSE plot")
     parser.add_argument("--paper", action="store_true", help="Use paper settings preset")
+    parser.add_argument(
+        "--allow-pickle",
+        action="store_true",
+        help="Allow loading legacy datasets with pickled metadata",
+    )
     return parser.parse_args()
 
 
-def load_dataset(path: Path) -> dict:
+def _coerce_meta(meta_json: np.ndarray | str) -> dict:
+    if isinstance(meta_json, np.ndarray):
+        meta_json = meta_json.item()
+    return json.loads(meta_json)
+
+
+def load_dataset(path: Path, allow_pickle: bool) -> dict:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            meta_json = data.get("meta_json")
+            meta = _coerce_meta(meta_json) if meta_json is not None else None
+            return {"train_u": data["train_u"], "test_u": data["test_u"], "meta": meta}
+    except ValueError as exc:
+        if not allow_pickle:
+            raise ValueError(
+                "Failed to load dataset without pickle. "
+                "If this is a legacy dataset, re-generate it or pass --allow-pickle."
+            ) from exc
+
     with np.load(path, allow_pickle=True) as data:
-        return {"train_u": data["train_u"], "test_u": data["test_u"], "meta": data.get("meta")}
+        meta = data.get("meta")
+        if isinstance(meta, np.ndarray):
+            meta = meta.item()
+        return {"train_u": data["train_u"], "test_u": data["test_u"], "meta": meta}
 
 
 def prepare_train_sequence(train_u: np.ndarray, discard: int, length: int | None) -> np.ndarray:
@@ -63,9 +91,10 @@ def prepare_train_sequence(train_u: np.ndarray, discard: int, length: int | None
 
 
 def run_experiment(args: argparse.Namespace) -> List[torch.Tensor]:
-    data = load_dataset(Path(args.data))
+    data = load_dataset(Path(args.data), allow_pickle=args.allow_pickle)
     train_u = data["train_u"]
     test_u = data["test_u"]
+    meta = data.get("meta")
 
     if args.paper:
         args.g = 64
@@ -83,6 +112,17 @@ def run_experiment(args: argparse.Namespace) -> List[torch.Tensor]:
         args.train_discard = 0
 
     interval_stride = args.interval_stride or args.predict_length
+    required_test = (args.num_intervals - 1) * interval_stride + (args.sync_length + args.predict_length)
+    actual_test_len = test_u.shape[0]
+    train_steps = train_u.shape[0]
+    if isinstance(meta, dict) and meta.get("train_steps") is not None:
+        train_steps = int(meta["train_steps"])
+    if actual_test_len < required_test:
+        raise ValueError(
+            f"Test data too short: need at least {required_test} steps, got {actual_test_len}. "
+            f"(K={args.num_intervals}, stride={interval_stride}, sync={args.sync_length}, "
+            f"pred={args.predict_length}). Regenerate with total_steps >= {train_steps + required_test}."
+        )
 
     train_seq = prepare_train_sequence(train_u, args.train_discard, args.train_length)
 
@@ -104,16 +144,13 @@ def run_experiment(args: argparse.Namespace) -> List[torch.Tensor]:
         dtype=dtype,
     )
 
-    model.fit(torch.from_numpy(train_seq).to(device=device, dtype=dtype), washout=0)
+    model.fit(torch.from_numpy(train_seq).to(device=device, dtype=dtype), washout=0, chunk_size=args.chunk_size)
 
     rmse_segments: List[torch.Tensor] = []
     test_tensor = torch.from_numpy(test_u).to(device=device, dtype=dtype)
-    required = args.sync_length + args.predict_length
     for k in range(args.num_intervals):
         start = k * interval_stride
-        end = start + required
-        if end > test_tensor.shape[0]:
-            raise ValueError("Test data too short for requested intervals")
+        end = start + args.sync_length + args.predict_length
         sync_inputs = test_tensor[start : start + args.sync_length]
         true_segment = test_tensor[start + args.sync_length : end]
         pred = model.predict(sync_inputs, predict_length=args.predict_length)

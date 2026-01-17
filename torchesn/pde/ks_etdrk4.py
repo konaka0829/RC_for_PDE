@@ -99,14 +99,13 @@ def simulate_ks_etdrk4(
 
     x = (L / Q) * np.arange(Q, dtype=calc_dtype)
     dx = L / Q
-    k = 2.0 * np.pi * np.fft.fftfreq(Q, d=dx).astype(calc_dtype)
-    k_indices = (np.fft.fftfreq(Q) * Q).astype(calc_dtype)
+    k = 2.0 * np.pi * np.fft.rfftfreq(Q, d=dx).astype(calc_dtype)
     if Q % 2 == 0:
-        k[Q // 2] = 0.0
-        k_indices[Q // 2] = 0.0
+        k[-1] = 0.0
+    mode_indices = np.arange(Q // 2 + 1, dtype=calc_dtype)
     cutoff = Q // 3
-    dealias_mask = (np.abs(k_indices) <= cutoff).astype(complex_dtype)
-    spectral_filter = np.ones(Q, dtype=complex_dtype)
+    dealias_mask = (mode_indices <= cutoff).astype(complex_dtype)
+    spectral_filter = np.ones(Q // 2 + 1, dtype=complex_dtype)
     if filter_strength > 0.0:
         k_abs = np.abs(k)
         k_max = np.max(k_abs) if np.max(k_abs) > 0 else 1.0
@@ -117,7 +116,7 @@ def simulate_ks_etdrk4(
     E, E2, Qcoef, f1, f2, f3 = _etdrk4_coefficients(L_hat.astype(complex_dtype), dt_sub)
 
     forcing = mu * np.cos(2.0 * np.pi * x / lambda_)
-    forcing_hat = np.fft.fft(forcing.astype(calc_dtype)).astype(complex_dtype)
+    forcing_hat = np.fft.rfft(forcing.astype(calc_dtype)).astype(complex_dtype) * dealias_mask
 
     if u0 is None:
         rng = np.random.default_rng(seed)
@@ -128,25 +127,36 @@ def simulate_ks_etdrk4(
             raise ValueError("u0 must have shape (Q,)")
 
     g = -0.5j * k
-    v = np.fft.fft(u).astype(complex_dtype) * combined_filter
+    v = np.fft.rfft(u).astype(complex_dtype) * combined_filter
 
     out = np.empty((n_steps, Q), dtype=dtype)
 
     for step in range(n_steps):
+        if not np.isfinite(u).all():
+            raise FloatingPointError(
+                "Non-finite values detected at step "
+                f"{step}. Consider increasing substeps, using float64, or reducing dt."
+            )
         out[step] = u.astype(dtype)
 
-        for _ in range(n_substeps):
-            Nv = g * np.fft.fft(u * u).astype(complex_dtype) * dealias_mask + forcing_hat
+        for substep in range(n_substeps):
+            Nv = g * np.fft.rfft(u * u).astype(complex_dtype) * dealias_mask + forcing_hat
             a = E2 * v + Qcoef * Nv
-            ua = np.fft.ifft(a).real.astype(calc_dtype)
-            Na = g * np.fft.fft(ua * ua).astype(complex_dtype) * dealias_mask + forcing_hat
+            ua = np.fft.irfft(a, n=Q).astype(calc_dtype)
+            Na = g * np.fft.rfft(ua * ua).astype(complex_dtype) * dealias_mask + forcing_hat
             b = E2 * v + Qcoef * Na
-            ub = np.fft.ifft(b).real.astype(calc_dtype)
-            Nb = g * np.fft.fft(ub * ub).astype(complex_dtype) * dealias_mask + forcing_hat
+            ub = np.fft.irfft(b, n=Q).astype(calc_dtype)
+            Nb = g * np.fft.rfft(ub * ub).astype(complex_dtype) * dealias_mask + forcing_hat
             c = E2 * a + Qcoef * (2.0 * Nb - Nv)
-            uc = np.fft.ifft(c).real.astype(calc_dtype)
-            Nc = g * np.fft.fft(uc * uc).astype(complex_dtype) * dealias_mask + forcing_hat
+            uc = np.fft.irfft(c, n=Q).astype(calc_dtype)
+            Nc = g * np.fft.rfft(uc * uc).astype(complex_dtype) * dealias_mask + forcing_hat
             v = (E * v + f1 * Nv + 2.0 * f2 * (Na + Nb) + f3 * Nc) * combined_filter
-            u = np.fft.ifft(v).real.astype(calc_dtype)
+            u = np.fft.irfft(v, n=Q).astype(calc_dtype)
+            if not np.isfinite(u).all():
+                raise FloatingPointError(
+                    "Non-finite values detected at step "
+                    f"{step}, substep {substep}. Consider increasing substeps, "
+                    "using float64, or reducing dt."
+                )
 
     return out

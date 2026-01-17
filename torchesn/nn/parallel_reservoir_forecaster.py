@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import torch
 
-from torchesn.nn.ridge_readout import ridge_regression, transform_state
+from torchesn.nn.ridge_readout import ridge_from_stats, transform_state
 from torchesn.nn.sparse_reservoir import SparseReservoir, build_sparse_reservoir
 
 
@@ -15,7 +15,7 @@ from torchesn.nn.sparse_reservoir import SparseReservoir, build_sparse_reservoir
 class ParallelReservoirState:
     reservoir: SparseReservoir
     state: torch.Tensor
-    Wout: torch.Tensor
+    Wout: Optional[torch.Tensor] = None
 
 
 def build_group_indices(Q: int, g: int, l: int) -> List[torch.Tensor]:
@@ -109,9 +109,8 @@ class ParallelReservoirForecaster:
                 device=self.device,
             )
             state = torch.zeros(shared.Win.shape[0], device=self.device, dtype=self.dtype)
-            dummy_Wout = torch.zeros((self.q, shared.Win.shape[0]), device=self.device, dtype=self.dtype)
             self.states = [
-                ParallelReservoirState(shared, state.clone(), dummy_Wout.clone()) for _ in range(self.g)
+                ParallelReservoirState(shared, state.clone()) for _ in range(self.g)
             ]
             return
 
@@ -128,8 +127,7 @@ class ParallelReservoirForecaster:
                 device=self.device,
             )
             state = torch.zeros(reservoir.Win.shape[0], device=self.device, dtype=self.dtype)
-            Wout = torch.zeros((self.q, reservoir.Win.shape[0]), device=self.device, dtype=self.dtype)
-            self.states.append(ParallelReservoirState(reservoir, state, Wout))
+            self.states.append(ParallelReservoirState(reservoir, state))
 
     def reset_states(self) -> None:
         for entry in self.states:
@@ -141,24 +139,49 @@ class ParallelReservoirForecaster:
         inputs: torch.Tensor,
         targets: torch.Tensor,
         washout: int,
+        chunk_size: int,
     ) -> torch.Tensor:
         if inputs.shape[0] < 2:
             raise ValueError("inputs must have at least 2 time steps")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
 
-        states = []
-        outputs = []
         entry.state = torch.zeros_like(entry.state)
-        for t in range(inputs.shape[0] - 1):
-            entry.state = entry.reservoir.step(entry.state, inputs[t])
-            if t >= washout:
-                states.append(transform_state(entry.state).unsqueeze(1))
-                outputs.append(targets[t + 1].unsqueeze(1))
+        Dr = entry.state.shape[0]
+        Dout = targets.shape[1]
+        XXT = torch.zeros((Dr, Dr), device=inputs.device, dtype=inputs.dtype)
+        YXT = torch.zeros((Dout, Dr), device=inputs.device, dtype=inputs.dtype)
+        x_chunk: List[torch.Tensor] = []
+        y_chunk: List[torch.Tensor] = []
+        sample_count = 0
 
-        X = torch.cat(states, dim=1)
-        Y = torch.cat(outputs, dim=1)
-        return ridge_regression(X, Y, self.beta)
+        with torch.no_grad():
+            for t in range(inputs.shape[0] - 1):
+                entry.state = entry.reservoir.step(entry.state, inputs[t])
+                if t >= washout:
+                    x_chunk.append(transform_state(entry.state))
+                    y_chunk.append(targets[t + 1])
+                    sample_count += 1
+                    if len(x_chunk) >= chunk_size:
+                        X = torch.stack(x_chunk, dim=1)
+                        Y = torch.stack(y_chunk, dim=1)
+                        XXT = XXT + X @ X.T
+                        YXT = YXT + Y @ X.T
+                        x_chunk.clear()
+                        y_chunk.clear()
 
-    def fit(self, train_u: torch.Tensor, washout: int = 0) -> None:
+            if x_chunk:
+                X = torch.stack(x_chunk, dim=1)
+                Y = torch.stack(y_chunk, dim=1)
+                XXT = XXT + X @ X.T
+                YXT = YXT + Y @ X.T
+
+        if sample_count == 0:
+            raise ValueError("washout leaves no samples for training")
+
+        return ridge_from_stats(XXT, YXT, self.beta)
+
+    def fit(self, train_u: torch.Tensor, washout: int = 0, chunk_size: int = 1024) -> None:
         if train_u.dim() != 2 or train_u.shape[1] != self.Q:
             raise ValueError("train_u must have shape (T, Q)")
 
@@ -167,7 +190,7 @@ class ParallelReservoirForecaster:
         if self.share_weights:
             inputs = train_u[:, self.input_indices[0]]
             targets = train_u[:, self.center_indices[0]]
-            Wout = self._fit_single(self.states[0], inputs, targets, washout)
+            Wout = self._fit_single(self.states[0], inputs, targets, washout, chunk_size)
             for entry in self.states:
                 entry.Wout = Wout.clone()
             return
@@ -175,7 +198,7 @@ class ParallelReservoirForecaster:
         for i, entry in enumerate(self.states):
             inputs = train_u[:, self.input_indices[i]]
             targets = train_u[:, self.center_indices[i]]
-            entry.Wout = self._fit_single(entry, inputs, targets, washout)
+            entry.Wout = self._fit_single(entry, inputs, targets, washout, chunk_size)
 
     def synchronize(self, sync_inputs: torch.Tensor) -> None:
         if sync_inputs.dim() != 2 or sync_inputs.shape[1] != self.Q:
