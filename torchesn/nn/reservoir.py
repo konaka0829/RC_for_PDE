@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import PackedSequence
+from ..utils import estimate_spectral_radius_power_iteration
 
 
 def apply_permutation(tensor, permutation, dim=1):
@@ -129,40 +130,49 @@ class Reservoir(nn.Module):
         W_hh := W_hh * (spectral_radius / max(|eigenvalues(W_hh)|))
         
         This initialization is critical for reservoir stability and performance.
+        For large reservoirs, spectral radius is estimated via power iteration
+        to avoid expensive eigenvalue computations.
         """
+        large_hidden_threshold = 512
         weight_dict = self.state_dict()
-        for key, value in weight_dict.items():
-            if key == 'weight_ih_l0':
-                # First layer input weights: uniform [-1,1] scaled by w_ih_scale
-                nn.init.uniform_(value, -1, 1)
-                value *= self.w_ih_scale[1:]  # Skip bias scale (index 0)
-            elif re.fullmatch('weight_ih_l[^0]*', key):
-                # Higher layer input weights: uniform [-1,1], no additional scaling
-                nn.init.uniform_(value, -1, 1)
-            elif re.fullmatch('bias_ih_l[0-9]*', key):
-                # Bias weights: uniform [-1,1] scaled by bias scale factor
-                nn.init.uniform_(value, -1, 1)
-                value *= self.w_ih_scale[0]  # First element is bias scale
-            elif re.fullmatch('weight_hh_l[0-9]*', key):
-                # Recurrent weights: the core of reservoir dynamics
-                w_hh = torch.Tensor(self.hidden_size * self.hidden_size)
-                w_hh.uniform_(-1, 1)
-                
-                # Apply sparsity: randomly zero out connections
-                if self.density < 1:
-                    zero_weights = torch.randperm(
-                        int(self.hidden_size * self.hidden_size))
-                    zero_weights = zero_weights[
-                                   :int(
-                                       self.hidden_size * self.hidden_size * (
-                                                   1 - self.density))]
-                    w_hh[zero_weights] = 0
-                
-                # Reshape and scale to desired spectral radius
-                w_hh = w_hh.view(self.hidden_size, self.hidden_size)
-                abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
-                # Scale largest eigenvalue to spectral_radius
-                weight_dict[key] = w_hh * (self.spectral_radius / torch.max(abs_eigs))
+        with torch.no_grad():
+            for key, value in weight_dict.items():
+                if key == 'weight_ih_l0':
+                    # First layer input weights: uniform [-1,1] scaled by w_ih_scale
+                    nn.init.uniform_(value, -1, 1)
+                    value *= self.w_ih_scale[1:]  # Skip bias scale (index 0)
+                elif re.fullmatch('weight_ih_l[^0]*', key):
+                    # Higher layer input weights: uniform [-1,1], no additional scaling
+                    nn.init.uniform_(value, -1, 1)
+                elif re.fullmatch('bias_ih_l[0-9]*', key):
+                    # Bias weights: uniform [-1,1] scaled by bias scale factor
+                    nn.init.uniform_(value, -1, 1)
+                    value *= self.w_ih_scale[0]  # First element is bias scale
+                elif re.fullmatch('weight_hh_l[0-9]*', key):
+                    # Recurrent weights: the core of reservoir dynamics
+                    w_hh = torch.empty(self.hidden_size * self.hidden_size, device=value.device)
+                    w_hh.uniform_(-1, 1)
+
+                    # Apply sparsity: randomly zero out connections
+                    if self.density < 1:
+                        zero_weights = torch.randperm(
+                            int(self.hidden_size * self.hidden_size), device=value.device)
+                        zero_weights = zero_weights[
+                                       :int(
+                                           self.hidden_size * self.hidden_size * (
+                                                       1 - self.density))]
+                        w_hh[zero_weights] = 0
+
+                    # Reshape and scale to desired spectral radius
+                    w_hh = w_hh.view(self.hidden_size, self.hidden_size)
+                    if self.hidden_size > large_hidden_threshold:
+                        abs_eigs_max = estimate_spectral_radius_power_iteration(w_hh)
+                    else:
+                        abs_eigs = torch.abs(torch.linalg.eigvals(w_hh))
+                        abs_eigs_max = torch.max(abs_eigs)
+                    eps = torch.finfo(w_hh.dtype).eps
+                    scale = self.spectral_radius / torch.clamp(abs_eigs_max, min=eps)
+                    weight_dict[key] = w_hh * scale
 
         self.load_state_dict(weight_dict)
 
@@ -323,6 +333,49 @@ class Reservoir(nn.Module):
             
         # Restore original batch ordering for hidden state
         return output, self.permute_hidden(hidden, unsorted_indices)
+
+    def step(self, input_t, hx=None):
+        """Advance the reservoir state by a single timestep.
+
+        Args:
+            input_t (Tensor): Input at the current timestep with shape
+                (batch, input_size) or (input_size,) for a single sample.
+            hx (Tensor, optional): Previous hidden state of shape
+                (num_layers, batch, hidden_size). Defaults to zeros.
+
+        Returns:
+            Tensor: Next hidden state of shape (num_layers, batch, hidden_size).
+        """
+        if input_t.dim() == 1:
+            input_t = input_t.unsqueeze(0)
+        if input_t.dim() != 2:
+            raise RuntimeError(
+                'input_t must have 1 or 2 dimensions, got {}'.format(input_t.dim()))
+        batch_size = input_t.size(0)
+
+        if hx is None:
+            hx = input_t.new_zeros(self.num_layers, batch_size, self.hidden_size,
+                                   requires_grad=False)
+        self.check_hidden_size(hx, (self.num_layers, batch_size, self.hidden_size))
+
+        if self.mode == 'RES_TANH':
+            cell = ResTanhCell
+        elif self.mode == 'RES_RELU':
+            cell = ResReLUCell
+        elif self.mode == 'RES_ID':
+            cell = ResIdCell
+        else:
+            raise ValueError("Unknown reservoir mode '{}'".format(self.mode))
+
+        next_hidden = []
+        layer_input = input_t
+        for layer_idx, weights in enumerate(self.all_weights):
+            hidden_layer = hx[layer_idx]
+            next_h = cell(layer_input, hidden_layer, self.leaking_rate, *weights)
+            next_hidden.append(next_h)
+            layer_input = next_h
+
+        return torch.stack(next_hidden, dim=0)
 
     def extra_repr(self):
         s = '({input_size}, {hidden_size}'

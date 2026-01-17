@@ -35,6 +35,11 @@ class ESN(nn.Module):
             1.0 = fully connected, lower values = sparser. Default: 1.0
         w_io (bool, optional): Whether to include direct input-to-output connections.
             Useful for tasks requiring input memory. Default: False
+        readout_features (str, optional): Feature transform applied before readout.
+            Options:
+            - 'linear': Use reservoir features as-is
+            - 'linear_and_square': Concatenate reservoir features with r^2
+            Default: 'linear'
         readout_training (str, optional): Training algorithm for readout layer.
             Options:
             - 'svd': Single-pass SVD (most stable, no mini-batching)
@@ -138,7 +143,8 @@ class ESN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1,
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
-                 w_io=False, readout_training='svd', output_steps='all'):
+                 w_io=False, readout_training='svd', output_steps='all',
+                 readout_features='linear'):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -170,17 +176,23 @@ class ESN(nn.Module):
         else:
             raise ValueError("Unknown readout training algorithm '{}'".format(
                 readout_training))
+        if readout_features in {'linear', 'linear_and_square'}:
+            self.readout_features = readout_features
+        else:
+            raise ValueError("Unknown readout feature mode '{}'".format(
+                readout_features))
 
         self.reservoir = Reservoir(mode, input_size, hidden_size, num_layers,
                                    leaking_rate, spectral_radius,
                                    self.w_ih_scale, density,
                                    batch_first=batch_first)
 
+        readout_input_size = hidden_size * num_layers
         if w_io:
-            self.readout = nn.Linear(input_size + hidden_size * num_layers,
-                                     output_size)
-        else:
-            self.readout = nn.Linear(hidden_size * num_layers, output_size)
+            readout_input_size += input_size
+        if self.readout_features == 'linear_and_square':
+            readout_input_size += hidden_size * num_layers
+        self.readout = nn.Linear(readout_input_size, output_size)
 
         if output_steps in {'all', 'mean', 'last'}:
             self.output_steps = output_steps
@@ -235,6 +247,8 @@ class ESN(nn.Module):
             # Apply washout: remove initial timesteps to stabilize dynamics
             output, seq_lengths = washout_tensor(output, washout, seq_lengths)
 
+            reservoir_output = output
+
             # Optionally concatenate input features to reservoir output
             if self.w_io:
                 if is_packed:
@@ -250,7 +264,17 @@ class ESN(nn.Module):
                     input = input.transpose(0, 1)
 
                 input, _ = washout_tensor(input, washout, input_lengths)
-                output = torch.cat([input, output], -1)
+            if self.readout_features == 'linear_and_square':
+                squared_reservoir = reservoir_output.pow(2)
+                if self.w_io:
+                    output = torch.cat([input, reservoir_output, squared_reservoir], -1)
+                else:
+                    output = torch.cat([reservoir_output, squared_reservoir], -1)
+            else:
+                if self.w_io:
+                    output = torch.cat([input, reservoir_output], -1)
+                else:
+                    output = reservoir_output
 
             # Branch based on training method
             if self.readout_training == 'gd' or target is None:
@@ -393,6 +417,98 @@ class ESN(nn.Module):
             self.readout.weight = nn.Parameter(W[:, 1:])
             self.XTX = None
             self.XTy = None
+
+    def step(self, input_t, washout=None, hx=None):
+        """Advance the ESN by a single timestep.
+
+        Args:
+            input_t (Tensor): Input at current timestep with shape
+                (batch, input_size) or (input_size,) for a single sample.
+            washout (list[int] or Tensor, optional): Washout lengths per sample.
+            hx (Tensor, optional): Previous hidden state of shape
+                (num_layers, batch, hidden_size).
+
+        Returns:
+            tuple: (output, hx_next) where output has shape
+                (1, batch, output_size) if batch_first=False, or
+                (batch, 1, output_size) if batch_first=True.
+        """
+        if input_t.dim() == 1:
+            input_t = input_t.unsqueeze(0)
+        if input_t.dim() != 2:
+            raise RuntimeError(
+                'input_t must have 1 or 2 dimensions, got {}'.format(input_t.dim()))
+        batch_size = input_t.size(0)
+        if washout is None:
+            washout = [0] * batch_size
+
+        hx_next = self.reservoir.step(input_t, hx)
+        reservoir_output = hx_next[-1]
+
+        if self.readout_features == 'linear_and_square':
+            squared_reservoir = reservoir_output.pow(2)
+            if self.w_io:
+                readout_input = torch.cat([input_t, reservoir_output, squared_reservoir], -1)
+            else:
+                readout_input = torch.cat([reservoir_output, squared_reservoir], -1)
+        else:
+            if self.w_io:
+                readout_input = torch.cat([input_t, reservoir_output], -1)
+            else:
+                readout_input = reservoir_output
+
+        with torch.enable_grad():
+            output = self.readout(readout_input)
+
+        if washout is not None:
+            washout_tensor = torch.as_tensor(washout, device=output.device)
+            if washout_tensor.numel() != batch_size:
+                raise RuntimeError(
+                    'washout must have length {}, got {}'.format(
+                        batch_size, washout_tensor.numel()))
+            mask = washout_tensor > 0
+            if mask.any():
+                output = output.clone()
+                output[mask] = 0
+
+        if self.batch_first:
+            output = output.unsqueeze(1)
+        else:
+            output = output.unsqueeze(0)
+
+        return output, hx_next
+
+    def predict_autoregressive(self, init_u, steps, hx=None):
+        """Closed-loop autoregressive prediction.
+
+        Args:
+            init_u (Tensor): Initial input with shape (batch, input_size) or
+                (input_size,) for a single sample.
+            steps (int): Number of autoregressive steps to generate.
+            hx (Tensor, optional): Initial hidden state.
+
+        Returns:
+            tuple: (outputs, hx_next) where outputs are stacked over time.
+        """
+        if steps <= 0:
+            raise ValueError('steps must be a positive integer.')
+
+        output_steps = []
+        current_input = init_u
+        for _ in range(steps):
+            output, hx = self.step(current_input, hx=hx)
+            output_steps.append(output)
+            if self.batch_first:
+                current_input = output.squeeze(1)
+            else:
+                current_input = output.squeeze(0)
+
+        if self.batch_first:
+            outputs = torch.cat(output_steps, dim=1)
+        else:
+            outputs = torch.cat(output_steps, dim=0)
+
+        return outputs, hx
 
     def reset_parameters(self):
         """Reset all learnable parameters to their initial values.
