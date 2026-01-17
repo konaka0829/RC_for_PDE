@@ -37,6 +37,28 @@ def test_parallel_forecaster_fit_predict():
     assert torch.isfinite(preds).all()
 
 
+def test_parallel_forecaster_predict_before_fit():
+    Q = 8
+    model = ParallelReservoirForecaster(
+        Q=Q,
+        g=2,
+        l=1,
+        reservoir_size_approx=50,
+        degree=3,
+        spectral_radius=0.6,
+        beta=1e-3,
+        seed=0,
+    )
+    sync = _make_series(10, Q)
+
+    try:
+        model.predict(sync, predict_length=5)
+    except ValueError as exc:
+        assert "Model has not been fit yet" in str(exc)
+    else:
+        raise AssertionError("predict should fail before fit")
+
+
 def test_parallel_matches_single_shape():
     Q = 6
     train = _make_series(120, Q)
