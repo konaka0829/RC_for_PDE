@@ -120,6 +120,8 @@ def save_rmse_plot(rmse_series: torch.Tensor, output_dir: Path) -> None:
 
 def save_prediction_heatmap(prediction: torch.Tensor, output_dir: Path) -> None:
     pred_np = prediction.detach().cpu().numpy()
+    if pred_np.ndim == 3 and pred_np.shape[1] == 1:
+        pred_np = pred_np[:, 0, :]
     fig, ax = plt.subplots(figsize=(8, 4))
     heatmap = ax.imshow(
         pred_np,
