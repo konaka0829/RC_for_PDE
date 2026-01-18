@@ -64,7 +64,11 @@ def scipy_sparse_to_torch(
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:
     A_coo = A_csr.tocoo()
-    indices = torch.tensor([A_coo.row, A_coo.col], dtype=torch.long, device=device)
+    indices = torch.as_tensor(
+        np.vstack((A_coo.row, A_coo.col)),
+        dtype=torch.long,
+        device=device,
+    )
     values = torch.tensor(A_coo.data, dtype=dtype, device=device)
     A_torch = torch.sparse_coo_tensor(indices, values, A_coo.shape, device=device, dtype=dtype)
     return A_torch.coalesce()
