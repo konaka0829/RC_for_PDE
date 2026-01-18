@@ -91,10 +91,19 @@ def autoregressive_rollout(
     pred_steps: int,
 ) -> torch.Tensor:
     with torch.no_grad():
-        _, hidden = model(warmup_u, washout=[0])
-        current = warmup_u[-1:, :, :]
-        predictions = []
-        for _ in range(pred_steps):
+        # Run teacher-forcing warmup from a zero state.
+        # NOTE: ESN forward returns output(t) after consuming input(t).
+        # Therefore, the last warmup output corresponds to the first
+        # one-step-ahead prediction we want to include.
+        warmup_out, hidden = model(warmup_u, washout=[0])
+
+        # First prediction: one step ahead of the last warmup input.
+        current = warmup_out[-1:, :, :]
+        if not torch.isfinite(current).all():
+            raise RuntimeError("Non-finite values detected during warmup.")
+
+        predictions = [current[0, 0]]
+        for _ in range(max(0, pred_steps - 1)):
             output, hidden = model(current, washout=[0], h_0=hidden)
             if not torch.isfinite(output).all():
                 raise RuntimeError("Non-finite values detected during rollout.")
