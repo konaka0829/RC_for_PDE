@@ -98,7 +98,7 @@ def autoregressive_rollout(
             output, hidden = model(current, washout=[0], h_0=hidden)
             if not torch.isfinite(output).all():
                 raise RuntimeError("Non-finite values detected during rollout.")
-            predictions.append(output.squeeze(0))
+            predictions.append(output[0, 0])
             current = output
         return torch.stack(predictions, dim=0)
 
