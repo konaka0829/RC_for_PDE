@@ -138,7 +138,8 @@ class ESN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1,
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
-                 w_io=False, readout_training='svd', output_steps='all'):
+                 w_io=False, readout_training='svd', output_steps='all',
+                 feature_transform='none', input_init='dense', win_sigma=1.0):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -174,7 +175,9 @@ class ESN(nn.Module):
         self.reservoir = Reservoir(mode, input_size, hidden_size, num_layers,
                                    leaking_rate, spectral_radius,
                                    self.w_ih_scale, density,
-                                   batch_first=batch_first)
+                                   batch_first=batch_first,
+                                   input_init=input_init,
+                                   win_sigma=win_sigma)
 
         if w_io:
             self.readout = nn.Linear(input_size + hidden_size * num_layers,
@@ -188,9 +191,25 @@ class ESN(nn.Module):
             raise ValueError("Unknown task '{}'".format(
                 output_steps))
 
+        if feature_transform in {'none', 'square_even'}:
+            self.feature_transform = feature_transform
+        else:
+            raise ValueError("Unknown feature transform '{}'".format(
+                feature_transform))
+
         self.XTX = None
         self.XTy = None
         self.X = None
+
+    def _apply_feature_transform(self, features):
+        if self.feature_transform == 'none':
+            return features
+        if self.feature_transform == 'square_even':
+            transformed = features.clone()
+            transformed[..., 1::2] = transformed[..., 1::2] ** 2
+            return transformed
+        raise RuntimeError("Unknown feature transform '{}'".format(
+            self.feature_transform))
 
     def forward(self, input, washout, h_0=None, target=None):
         """Forward pass through the Echo State Network.
@@ -252,6 +271,8 @@ class ESN(nn.Module):
                 input, _ = washout_tensor(input, washout, input_lengths)
                 output = torch.cat([input, output], -1)
 
+            output = self._apply_feature_transform(output)
+
             # Branch based on training method
             if self.readout_training == 'gd' or target is None:
                 # Online training or inference: use current readout weights
@@ -299,6 +320,7 @@ class ESN(nn.Module):
                         X[row, 1:] = output[seq_lengths[s] - 1, s]
                         row += 1
                 assert row == target.size(0)
+                self.X = X
 
                 if self.readout_training == 'cholesky':
                     # Accumulate normal equations for Cholesky solve

@@ -78,7 +78,8 @@ class Reservoir(nn.Module):
 
     def __init__(self, mode, input_size, hidden_size, num_layers, leaking_rate,
                  spectral_radius, w_ih_scale,
-                 density, bias=True, batch_first=False):
+                 density, bias=True, batch_first=False, input_init='dense',
+                 win_sigma=1.0):
         super(Reservoir, self).__init__()
         self.mode = mode
         self.input_size = input_size
@@ -90,6 +91,16 @@ class Reservoir(nn.Module):
         self.density = density
         self.bias = bias
         self.batch_first = batch_first
+        if input_init in {'dense', 'block'}:
+            self.input_init = input_init
+        else:
+            raise ValueError("Unknown input initialization '{}'".format(
+                input_init))
+        self.win_sigma = win_sigma
+
+        if self.input_init == 'block' and hidden_size % input_size != 0:
+            raise ValueError(
+                'hidden_size must be divisible by input_size for block init')
 
         self._all_weights = []
         for layer in range(num_layers):
@@ -133,9 +144,17 @@ class Reservoir(nn.Module):
         weight_dict = self.state_dict()
         for key, value in weight_dict.items():
             if key == 'weight_ih_l0':
-                # First layer input weights: uniform [-1,1] scaled by w_ih_scale
-                nn.init.uniform_(value, -1, 1)
-                value *= self.w_ih_scale[1:]  # Skip bias scale (index 0)
+                if self.input_init == 'dense':
+                    # First layer input weights: uniform [-1,1] scaled by w_ih_scale
+                    nn.init.uniform_(value, -1, 1)
+                    value *= self.w_ih_scale[1:]  # Skip bias scale (index 0)
+                else:
+                    # Block input weights: each input connects to a contiguous block
+                    value.zero_()
+                    block_size = self.hidden_size // self.input_size
+                    for i in range(self.input_size):
+                        rows = slice(i * block_size, (i + 1) * block_size)
+                        value[rows, i].uniform_(-self.win_sigma, self.win_sigma)
             elif re.fullmatch('weight_ih_l[^0]*', key):
                 # Higher layer input weights: uniform [-1,1], no additional scaling
                 nn.init.uniform_(value, -1, 1)
