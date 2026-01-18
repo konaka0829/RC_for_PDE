@@ -139,7 +139,8 @@ class ESN(nn.Module):
                  nonlinearity='tanh', batch_first=False, leaking_rate=1,
                  spectral_radius=0.9, w_ih_scale=1, lambda_reg=0, density=1,
                  w_io=False, readout_training='svd', output_steps='all',
-                 feature_transform='none', input_init='dense', win_sigma=1.0):
+                 feature_transform='none', input_init='dense', win_sigma=1.0,
+                 reservoir_bias=True, readout_bias=True):
         super(ESN, self).__init__()
 
         self.input_size = input_size
@@ -166,6 +167,7 @@ class ESN(nn.Module):
         self.lambda_reg = lambda_reg
         self.density = density
         self.w_io = w_io
+        self.readout_bias = readout_bias
         if readout_training in {'gd', 'svd', 'cholesky', 'inv'}:
             self.readout_training = readout_training
         else:
@@ -175,15 +177,18 @@ class ESN(nn.Module):
         self.reservoir = Reservoir(mode, input_size, hidden_size, num_layers,
                                    leaking_rate, spectral_radius,
                                    self.w_ih_scale, density,
+                                   bias=reservoir_bias,
                                    batch_first=batch_first,
                                    input_init=input_init,
                                    win_sigma=win_sigma)
 
         if w_io:
             self.readout = nn.Linear(input_size + hidden_size * num_layers,
-                                     output_size)
+                                     output_size,
+                                     bias=readout_bias)
         else:
-            self.readout = nn.Linear(hidden_size * num_layers, output_size)
+            self.readout = nn.Linear(hidden_size * num_layers, output_size,
+                                     bias=readout_bias)
 
         if output_steps in {'all', 'mean', 'last'}:
             self.output_steps = output_steps
@@ -300,24 +305,37 @@ class ESN(nn.Module):
                 # Offline training: accumulate statistics for ridge regression
                 batch_size = output.size(1)
 
-                # Prepare design matrix X with bias column
-                X = torch.ones(target.size(0), 1 + output.size(2),
-                               device=target.device, dtype=output.dtype)
+                # Prepare design matrix X with optional bias column
+                if self.readout_bias:
+                    X = torch.ones(target.size(0), 1 + output.size(2),
+                                   device=target.device, dtype=output.dtype)
+                else:
+                    X = torch.empty(target.size(0), output.size(2),
+                                    device=target.device, dtype=output.dtype)
                 row = 0
                 
                 # Fill design matrix based on output aggregation method
                 for s in range(batch_size):
                     if self.output_steps == 'all':
                         # Use all timesteps for sequence-to-sequence tasks
-                        X[row:row + seq_lengths[s], 1:] = output[:seq_lengths[s], s]
+                        if self.readout_bias:
+                            X[row:row + seq_lengths[s], 1:] = output[:seq_lengths[s], s]
+                        else:
+                            X[row:row + seq_lengths[s]] = output[:seq_lengths[s], s]
                         row += seq_lengths[s]
                     elif self.output_steps == 'mean':
                         # Use temporal mean for classification
-                        X[row, 1:] = torch.mean(output[:seq_lengths[s], s], 0)
+                        if self.readout_bias:
+                            X[row, 1:] = torch.mean(output[:seq_lengths[s], s], 0)
+                        else:
+                            X[row] = torch.mean(output[:seq_lengths[s], s], 0)
                         row += 1
                     elif self.output_steps == 'last':
                         # Use final timestep for classification
-                        X[row, 1:] = output[seq_lengths[s] - 1, s]
+                        if self.readout_bias:
+                            X[row, 1:] = output[seq_lengths[s] - 1, s]
+                        else:
+                            X[row] = output[seq_lengths[s] - 1, s]
                         row += 1
                 assert row == target.size(0)
                 self.X = X
@@ -344,9 +362,12 @@ class ESN(nn.Module):
                     W = torch.mm(Vh.t(), d_UT_y).t()
 
                     # Set readout parameters directly
-                    self.readout.bias = nn.Parameter(W[:, 0])
-                    self.readout.weight = nn.Parameter(W[:, 1:])
-                    
+                    if self.readout_bias:
+                        self.readout.bias = nn.Parameter(W[:, 0])
+                        self.readout.weight = nn.Parameter(W[:, 1:])
+                    else:
+                        self.readout.weight = nn.Parameter(W)
+                
                 elif self.readout_training == 'inv':
                     # Accumulate normal equations for matrix inversion solve
                     if self.XTX is None:
@@ -386,20 +407,26 @@ class ESN(nn.Module):
             # Solve (X^T X + λI) W = X^T y using Cholesky decomposition
             A = self.XTX + self.lambda_reg * torch.eye(
                 self.XTX.size(0), device=self.XTX.device, dtype=self.XTX.dtype)
+            A = 0.5 * (A + A.t())
             try:
                 L = torch.linalg.cholesky(A)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Cholesky decomposition failed. Please set lambda_reg > 0."
-                ) from exc
-            W = torch.cholesky_solve(self.XTy, L).t()
+                W = torch.cholesky_solve(self.XTy, L)
+            except RuntimeError:
+                try:
+                    W = torch.linalg.solve(A, self.XTy)
+                except RuntimeError:
+                    W = torch.linalg.pinv(A) @ self.XTy
+            W = W.t()
             # Clear accumulated statistics
             self.XTX = None
             self.XTy = None
 
             # Set learned parameters
-            self.readout.bias = nn.Parameter(W[:, 0])
-            self.readout.weight = nn.Parameter(W[:, 1:])
+            if self.readout_bias:
+                self.readout.bias = nn.Parameter(W[:, 0])
+                self.readout.weight = nn.Parameter(W[:, 1:])
+            else:
+                self.readout.weight = nn.Parameter(W)
             
         elif self.readout_training == 'inv':
             # Solve (X^T X + λI) W = X^T y using matrix inversion
@@ -411,8 +438,11 @@ class ESN(nn.Module):
                 W = (torch.linalg.pinv(A) @ self.XTy).t()
 
             # Set learned parameters and clear statistics
-            self.readout.bias = nn.Parameter(W[:, 0])
-            self.readout.weight = nn.Parameter(W[:, 1:])
+            if self.readout_bias:
+                self.readout.bias = nn.Parameter(W[:, 0])
+                self.readout.weight = nn.Parameter(W[:, 1:])
+            else:
+                self.readout.weight = nn.Parameter(W)
             self.XTX = None
             self.XTy = None
 

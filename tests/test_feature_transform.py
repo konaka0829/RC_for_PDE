@@ -51,6 +51,32 @@ class FeatureTransformTests(unittest.TestCase):
         self.assertTrue(torch.equal(model.X[:, 0], torch.ones(2)))
         self.assertTrue(torch.equal(model.X[:, 1:], expected[:, 0, :]))
 
+    def test_offline_design_matrix_no_bias_column(self):
+        output = torch.tensor([
+            [[1.0, 2.0, 3.0, 4.0]],
+            [[5.0, 6.0, 7.0, 8.0]],
+        ])
+        hidden = torch.zeros(1, 1, 4)
+        model = ESN(
+            1,
+            4,
+            1,
+            readout_training='cholesky',
+            output_steps='all',
+            feature_transform='square_even',
+            readout_bias=False,
+        )
+        model.reservoir = DummyReservoir(output, hidden)
+        input_tensor = torch.zeros(2, 1, 1)
+        target = torch.zeros(2, 1)
+
+        model(input_tensor, washout=[0], target=target)
+
+        expected = output.clone()
+        expected[..., 1::2] = expected[..., 1::2] ** 2
+        self.assertEqual(tuple(model.X.shape), (2, 4))
+        self.assertTrue(torch.equal(model.X, expected[:, 0, :]))
+
 
 if __name__ == '__main__':
     unittest.main()

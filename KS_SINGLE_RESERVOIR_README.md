@@ -11,6 +11,10 @@
 - **学習タスク**: 1 ステップ先予測 `u(t) -> u(t+dt)`
 - **学習**: `readout_training="cholesky"` を用いた ridge 回帰
 - **特徴変換**: `feature_transform="square_even"` を学習/推論の両方に適用
+- **MATLAB 寄り設定**:
+  - block Win (`--input-init block`)
+  - degree=3 相当の疎な再帰結合 (`density = degree / hidden_size`)
+  - bias 無し (`--reservoir-bias`/`--readout-bias` を使わない)
 - **検証**: 予測区間の RMSE を算出し、プロットとして保存
 - **出力**:
   - RMSE 時系列プロット (`pdf/png/svg`)
@@ -58,6 +62,24 @@ python examples/ks_single_reservoir.py \
 ```
 
 - `--no-plots` を指定すると、RMSE/ヒートマップ出力をスキップできます。
+- `--input-init block` の場合は `hidden_size` が `n_grid` の倍数になるように
+  自動調整されます。
+
+### 4) MATLAB 寄りの推奨例 (軽め)
+
+```bash
+python examples/ks_single_reservoir.py \
+  --n-grid 64 \
+  --train-steps 2000 \
+  --pred-steps 500 \
+  --warmup-steps 200 \
+  --hidden-size 512 \
+  --spectral-radius 0.6 \
+  --degree 3 \
+  --win-sigma 0.5 \
+  --lambda-reg 1e-3 \
+  --no-plots
+```
 
 ## 予測の仕組み (簡単な説明)
 

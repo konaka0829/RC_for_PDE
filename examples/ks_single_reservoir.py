@@ -37,6 +37,13 @@ class KSRunConfig:
     spectral_radius: float = 0.9
     leaking_rate: float = 1.0
     lambda_reg: float = 1e-4
+    degree: int = 3
+    density: float | None = None
+    input_init: str = "block"
+    win_sigma: float = 0.5
+    reservoir_bias: bool = False
+    readout_bias: bool = False
+    torch_seed: int | None = None
     seed: int = 0
     output_dir: Path = Path("outputs")
     save_plots: bool = True
@@ -62,7 +69,14 @@ def train_esn(
     spectral_radius: float,
     leaking_rate: float,
     lambda_reg: float,
+    density: float,
+    input_init: str,
+    win_sigma: float,
+    reservoir_bias: bool,
+    readout_bias: bool,
+    torch_seed: int,
 ) -> ESN:
+    torch.manual_seed(torch_seed)
     model = ESN(
         input_size=train_u.size(-1),
         hidden_size=hidden_size,
@@ -70,6 +84,11 @@ def train_esn(
         spectral_radius=spectral_radius,
         leaking_rate=leaking_rate,
         lambda_reg=lambda_reg,
+        density=density,
+        input_init=input_init,
+        win_sigma=win_sigma,
+        reservoir_bias=reservoir_bias,
+        readout_bias=readout_bias,
         readout_training="cholesky",
         output_steps="all",
         feature_transform="square_even",
@@ -169,12 +188,40 @@ def run_experiment(config: KSRunConfig) -> float:
         dtype=torch.float32,
     )
 
+    adjusted_hidden_size = config.hidden_size
+    if config.input_init == "block":
+        adjusted_hidden_size = (config.hidden_size // config.n_grid) * config.n_grid
+        if adjusted_hidden_size == 0:
+            raise ValueError(
+                "hidden_size is too small to be divisible by n_grid for block input "
+                f"weights (hidden_size={config.hidden_size}, n_grid={config.n_grid})"
+            )
+        if adjusted_hidden_size != config.hidden_size:
+            print(
+                "hidden_size adjusted from "
+                f"{config.hidden_size} to {adjusted_hidden_size} "
+                f"to be divisible by n_grid={config.n_grid} for block input weights",
+                file=sys.stderr,
+            )
+
+    density = config.density
+    if density is None:
+        density = min(1.0, config.degree / adjusted_hidden_size)
+
+    torch_seed = config.torch_seed if config.torch_seed is not None else config.seed
+
     model = train_esn(
         train_u,
-        hidden_size=config.hidden_size,
+        hidden_size=adjusted_hidden_size,
         spectral_radius=config.spectral_radius,
         leaking_rate=config.leaking_rate,
         lambda_reg=config.lambda_reg,
+        density=density,
+        input_init=config.input_init,
+        win_sigma=config.win_sigma,
+        reservoir_bias=config.reservoir_bias,
+        readout_bias=config.readout_bias,
+        torch_seed=torch_seed,
     )
     prediction = autoregressive_rollout(model, warmup_u, config.pred_steps)
     rmse = compute_rmse(prediction, target_u)
@@ -204,6 +251,13 @@ def parse_args() -> KSRunConfig:
     parser.add_argument("--spectral-radius", type=float, default=0.9)
     parser.add_argument("--leaking-rate", type=float, default=1.0)
     parser.add_argument("--lambda-reg", type=float, default=1e-4)
+    parser.add_argument("--degree", type=int, default=3)
+    parser.add_argument("--density", type=float, default=None)
+    parser.add_argument("--input-init", choices=["dense", "block"], default="block")
+    parser.add_argument("--win-sigma", type=float, default=0.5)
+    parser.add_argument("--reservoir-bias", action="store_true", default=False)
+    parser.add_argument("--readout-bias", action="store_true", default=False)
+    parser.add_argument("--torch-seed", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--no-plots", action="store_true")
@@ -220,6 +274,13 @@ def parse_args() -> KSRunConfig:
         spectral_radius=args.spectral_radius,
         leaking_rate=args.leaking_rate,
         lambda_reg=args.lambda_reg,
+        degree=args.degree,
+        density=args.density,
+        input_init=args.input_init,
+        win_sigma=args.win_sigma,
+        reservoir_bias=args.reservoir_bias,
+        readout_bias=args.readout_bias,
+        torch_seed=args.torch_seed,
         seed=args.seed,
         output_dir=args.output_dir,
         save_plots=not args.no_plots,
