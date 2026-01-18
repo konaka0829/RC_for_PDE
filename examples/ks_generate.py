@@ -8,6 +8,11 @@ import json
 import sys
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +20,31 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from torchesn.pde import simulate_ks_etdrk4
+
+
+def save_ks_plots(
+    *,
+    output_path: Path,
+    u: np.ndarray,
+    x: np.ndarray,
+    t: np.ndarray,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    im = ax.imshow(
+        u,
+        aspect="auto",
+        origin="lower",
+        extent=[float(x.min()), float(x.max()), float(t.min()), float(t.max())],
+    )
+    ax.set_xlabel("x")
+    ax.set_ylabel("t")
+    ax.set_title("Kuramoto–Sivashinsky equation")
+    fig.colorbar(im, ax=ax, label="u")
+
+    for suffix in (".pdf", ".png", ".svg"):
+        fig.savefig(output_path.with_suffix(suffix), bbox_inches="tight")
+
+    plt.close(fig)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -78,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     meta_json = json.dumps(result["meta"], ensure_ascii=False, sort_keys=True)
     np.savez(output_path, u=result["u"], x=result["x"], t=result["t"], meta=meta_json)
+    save_ks_plots(output_path=output_path, u=result["u"], x=result["x"], t=result["t"])
 
     u = result["u"]
     stats = (
