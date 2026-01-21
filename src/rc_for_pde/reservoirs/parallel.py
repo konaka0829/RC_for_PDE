@@ -37,18 +37,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import torch
 
-# Reuse the exact same reservoir generator + block-input implementation as the
-# single-reservoir PyTorch port.
-from ks_basic_single_reservoir_torch import (
-    generate_reservoir_sparse,
-    make_block_input_weights,
-)
-
-
-def _as_device(device: Optional[torch.device | str]) -> torch.device:
-    if device is None:
-        return torch.device("cpu")
-    return device if isinstance(device, torch.device) else torch.device(device)
+from rc_for_pde.reservoirs.common import _as_device, generate_reservoir_sparse, make_block_input_weights
 
 
 @dataclass(frozen=True)
@@ -308,11 +297,23 @@ class KSParallelReservoir(torch.nn.Module):
 
             # Ridge regression: Wout = YX (S + beta I)^{-1}
             beta = float(self.params.beta)
-            if beta > 0:
-                S = S + beta * torch.eye(self.N, device=self.device, dtype=self.dtype)
+            jitter = max(beta, 1e-12)
+            eye = torch.eye(self.N, device=self.device, dtype=self.dtype)
+            S = torch.nan_to_num(S)
+            YX = torch.nan_to_num(YX)
+            for _ in range(6):
+                try:
+                    Lchol = torch.linalg.cholesky(S + jitter * eye)
+                    break
+                except torch._C._LinAlgError:
+                    jitter *= 10.0
+            else:
+                Lchol = None
 
-            Lchol = torch.linalg.cholesky(S)
-            w_out_T = torch.cholesky_solve(YX.T, Lchol)
+            if Lchol is not None:
+                w_out_T = torch.cholesky_solve(YX.T, Lchol)
+            else:
+                w_out_T = YX.T @ torch.linalg.pinv(S + jitter * eye)
             w_out = w_out_T.T.contiguous()
 
             return w_out, x
