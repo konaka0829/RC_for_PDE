@@ -1,0 +1,1 @@
+"""Kuramoto–Sivashinsky solvers."""
